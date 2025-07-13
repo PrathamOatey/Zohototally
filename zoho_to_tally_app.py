@@ -7,13 +7,10 @@ from datetime import datetime
 import io
 import tempfile
 import shutil
-import math # For math.isnan
+import math
+from xml.sax.saxutils import escape as xml_escape
 
 # --- Configuration (Streamlit App) ---
-# This path is not directly used for file upload but defines expected internal structure
-# if manual placement was considered. For Streamlit, we use uploaded files directly.
-# ZOHO_ZIP_FILENAME = "Plant Essentials Private Limited_2025-07-09.zip" # Not directly used for upload
-
 # List of expected Zoho CSV files from the ZIP backup
 ZOHO_CSVS = [
     'Chart_of_Accounts.csv',
@@ -25,9 +22,9 @@ ZOHO_CSVS = [
     'Credit_Note.csv',
     'Journal.csv',
     'Bill.csv',
-    'Sales_Order.csv',
-    'Purchase_Order.csv',
-    'Item.csv'
+    'Sales_Order.csv', # Included in list but not fully processed for Tally XML in current scope
+    'Purchase_Order.csv', # Included in list but not fully processed for Tally XML in current scope
+    'Item.csv' # Included in list but not fully processed for Tally XML in current scope
 ]
 
 # Company details (YOU MUST UPDATE THESE TO MATCH YOUR TALLY COMPANY EXACTLY)
@@ -36,13 +33,17 @@ BASE_CURRENCY_SYMBOL = "₹"
 BASE_CURRENCY_NAME = "Rupees"
 DEFAULT_COUNTRY = "India" # Assuming default country for addresses
 
-# --- Helper Functions (Reused from previous scripts) ---
+# --- Helper Functions ---
 
 def safe_str(value):
-    """Converts a value to string, handling NaN/None gracefully."""
+    """
+    Converts a value to string, handling NaN/None gracefully,
+    and escapes XML special characters.
+    """
     if pd.isna(value):
         return ""
-    return str(value).strip()
+    s_val = str(value).strip()
+    return xml_escape(s_val) # Apply XML escaping here
 
 def format_tally_date(date_str):
     """Converts 'YYYY-MM-DD' string to Tally's 'YYYYMMDD' format."""
@@ -52,14 +53,19 @@ def format_tally_date(date_str):
         dt_obj = datetime.strptime(date_str, '%Y-%m-%d')
         return dt_obj.strftime('%Y%m%d')
     except ValueError:
-        st.warning(f"Invalid date format encountered: {date_str}. Returning empty string.")
+        st.warning(f"Invalid date format encountered: {date_str}. Returning empty string for date.")
         return ""
 
 def format_tally_amount(amount):
     """Formats a numeric amount for Tally, handling NaN."""
     if pd.isna(amount):
         return "0.00"
-    return f"{amount:.2f}" # Format to 2 decimal places
+    try:
+        return f"{float(amount):.2f}" # Ensure it's a float before formatting
+    except ValueError:
+        st.warning(f"Invalid amount encountered: {amount}. Returning '0.00'.")
+        return "0.00"
+
 
 def create_tally_envelope(report_name="All Masters", request_xml_tags="ACCOUNTS"):
     """
@@ -86,13 +92,17 @@ def create_tally_envelope(report_name="All Masters", request_xml_tags="ACCOUNTS"
 # --- Data Cleaning and Mapping Functions (from 02_clean_map.py) ---
 
 def format_date_column(df, column_name):
-    if column_name in df.columns and not df[column_name].empty:
+    """Converts a column to datetime objects and then formats as 'YYYY-MM-DD' string."""
+    if column_name in df.columns:
+        # Attempt to convert to datetime, coercing errors
         df[column_name] = pd.to_datetime(df[column_name], errors='coerce')
+        # Format valid dates, set invalid/NaT dates to empty string
         df[column_name] = df[column_name].dt.strftime('%Y-%m-%d').fillna('')
     return df
 
 def clean_numeric_column(df, column_name):
-    if column_name in df.columns and not df[column_name].empty:
+    """Converts a column to numeric, filling NaNs with 0.0."""
+    if column_name in df.columns:
         df[column_name] = pd.to_numeric(df[column_name], errors='coerce').fillna(0.0)
     return df
 
@@ -124,22 +134,37 @@ def process_chart_of_accounts(df):
 
     df['Tally_Parent_Group'] = df['Account Type'].astype(str).apply(lambda x: account_type_map.get(x, 'Suspense A/c'))
 
+    # Use .get() method for renaming to avoid KeyError if original column does not exist
     df_mapped = df.rename(columns={
         'Account Name': 'Tally_Ledger_Name',
         'Account Code': 'Tally_Account_Code',
         'Description': 'Tally_Description',
         'Account Status': 'Tally_Status',
-    })
+    }, errors='ignore') # 'errors=ignore' will keep original column name if new is not found
 
-    df_mapped['Tally_Description'] = df_mapped['Tally_Description'].fillna('')
-    df_mapped['Tally_Account_Code'] = df_mapped['Tally_Account_Code'].fillna('')
-    df_mapped['Parent Account'] = df_mapped['Parent Account'].fillna('')
+    # Fill missing values for string columns - check for column existence first
+    if 'Tally_Description' in df_mapped.columns:
+        df_mapped['Tally_Description'] = df_mapped['Tally_Description'].fillna('')
+    if 'Tally_Account_Code' in df_mapped.columns:
+        df_mapped['Tally_Account_Code'] = df_mapped['Tally_Account_Code'].fillna('')
+    if 'Parent Account' in df_mapped.columns:
+        df_mapped['Parent Account'] = df_mapped['Parent Account'].fillna('')
 
-    df_processed = df_mapped[[
+    columns_to_select = [
         'Account ID', 'Tally_Ledger_Name', 'Tally_Account_Code', 'Tally_Description',
-        'Account Type', 'Tally_Parent_Group', 'Tally_Status', 'Currency', 'Parent Account',
-        'Opening Balance' # Added to COA processing for completeness
-    ]].copy()
+        'Account Type', 'Tally_Parent_Group', 'Tally_Status', 'Currency', 'Parent Account'
+    ]
+    # Check if 'Opening Balance' column exists before trying to select it
+    if 'Opening Balance' in df_mapped.columns:
+        columns_to_select.append('Opening Balance')
+        st.info("Found 'Opening Balance' column in Chart_of_Accounts.csv. Including it.")
+    else:
+        st.warning("No 'Opening Balance' column found in Chart_of_Accounts.csv. Ledgers will be created with 0.00 opening balance unless specified otherwise in Contacts/Vendors.")
+    
+    # Filter columns to only those that exist in df_mapped to prevent KeyError
+    existing_columns_to_select = [col for col in columns_to_select if col in df_mapped.columns]
+    df_processed = df_mapped[existing_columns_to_select].copy()
+
     st.success(f"Processed {len(df_processed)} Chart of Accounts entries.")
     return df_processed
 
@@ -161,24 +186,25 @@ def process_contacts(df):
         'Skype Identity', 'Facebook', 'Twitter', 'Department', 'Designation',
         'Price List', 'Payment Terms', 'Payment Terms Label', 'GST Treatment',
         'GST Identification Number (GSTIN)', 'Owner Name', 'Primary Contact ID',
-        'Contact Name', 'Contact Type', 'Place Of Contact', 'Place of Contact(With State Code)',
+        'Contact ID', 'Contact Name', 'Contact Type', 'Place Of Contact', 'Place of Contact(With State Code)',
         'Taxable', 'TaxID', 'Tax Name', 'Tax Type', 'Exemption Reason', 'Source'
     ]
     for col in string_cols:
-        if col in df_cleaned.columns:
+        if col in df_cleaned.columns: # Check for column existence
             df_cleaned[col] = df_cleaned[col].fillna('').astype(str)
 
     numeric_cols = ['Credit Limit', 'Opening Balance', 'Opening Balance Exchange Rate', 'Tax Percentage']
     for col in numeric_cols:
-        if col in df_cleaned.columns:
+        if col in df_cleaned.columns: # Check for column existence
             df_cleaned = clean_numeric_column(df_cleaned, col)
 
-    df_cleaned['Tally_Billing_Address_Line1'] = df_cleaned['Billing Address'].fillna('')
-    df_cleaned['Tally_Billing_Address_Line2'] = df_cleaned['Billing Street2'].fillna('')
-    df_cleaned['Tally_Shipping_Address_Line1'] = df_cleaned['Shipping Address'].fillna('')
-    df_cleaned['Tally_Shipping_Address_Line2'] = df_cleaned['Shipping Street2'].fillna('')
-    df_cleaned['Tally_Billing_State'] = df_cleaned['Billing State']
-    df_cleaned['Tally_Shipping_State'] = df_cleaned['Shipping State']
+    df_cleaned['Tally_Billing_Address_Line1'] = df_cleaned['Billing Address'].fillna('') if 'Billing Address' in df_cleaned.columns else ''
+    df_cleaned['Tally_Billing_Address_Line2'] = df_cleaned['Billing Street2'].fillna('') if 'Billing Street2' in df_cleaned.columns else ''
+    df_cleaned['Tally_Shipping_Address_Line1'] = df_cleaned['Shipping Address'].fillna('') if 'Shipping Address' in df_cleaned.columns else ''
+    df_cleaned['Tally_Shipping_Address_Line2'] = df_cleaned['Shipping Street2'].fillna('') if 'Shipping Street2' in df_cleaned.columns else ''
+    df_cleaned['Tally_Billing_State'] = df_cleaned['Billing State'] if 'Billing State' in df_cleaned.columns else ''
+    df_cleaned['Tally_Shipping_State'] = df_cleaned['Shipping State'] if 'Shipping State' in df_cleaned.columns else ''
+
 
     df_processed = df_cleaned.rename(columns={
         'Display Name': 'Tally_Party_Name',
@@ -188,9 +214,10 @@ def process_contacts(df):
         'MobilePhone': 'Tally_Mobile',
         'Credit Limit': 'Tally_Credit_Limit',
         'Place of Contact(With State Code)': 'Tally_Place_of_Supply_Code'
-    })
+    }, errors='ignore')
 
-    df_final = df_processed[[
+    # Dynamically select columns to avoid KeyError
+    final_cols_contacts = [
         'Contact ID', 'Tally_Party_Name', 'Company Name', 'Tally_Email',
         'Tally_Phone', 'Tally_Mobile', 'Tally_GSTIN',
         'Tally_Billing_Address_Line1', 'Tally_Billing_Address_Line2', 'Billing City',
@@ -198,7 +225,11 @@ def process_contacts(df):
         'Tally_Shipping_Address_Line1', 'Tally_Shipping_Address_Line2', 'Shipping City',
         'Tally_Shipping_State', 'Shipping Country', 'Shipping Code',
         'Tally_Credit_Limit', 'Opening Balance', 'Status', 'Tally_Place_of_Supply_Code', 'GST Treatment'
-    ]].copy()
+    ]
+    # Filter to only include columns that actually exist in the DataFrame
+    final_cols_contacts = [col for col in final_cols_contacts if col in df_processed.columns]
+    
+    df_final = df_processed[final_cols_contacts].copy()
     st.success(f"Processed {len(df_final)} Contacts entries.")
     return df_final
 
@@ -211,16 +242,16 @@ def process_vendors(df):
     df_cleaned = format_date_column(df_cleaned, 'Last Modified Time')
 
     string_cols = [
-        'Contact Name', 'Company Name', 'Display Name', 'Salutation', 'First Name',
+        'Contact ID', 'Contact Name', 'Company Name', 'Display Name', 'Salutation', 'First Name',
         'Last Name', 'EmailID', 'Phone', 'MobilePhone', 'Payment Terms', 'Currency Code',
-        'Notes', 'Website', 'Status', 'Location Name', 'Payment Terms Label',
+        'Notes', 'Website', 'Status', 'Location ID', 'Location Name', 'Payment Terms Label',
         'Source of Supply', 'Skype Identity', 'Department', 'Designation', 'Facebook', 'Twitter',
         'GST Treatment', 'GST Identification Number (GSTIN)', 'MSME/Udyam No', 'MSME/Udyam Type',
         'TDS Name', 'TDS Section', 'Price List', 'Contact Address ID', 'Billing Attention',
         'Billing Address', 'Billing Street2', 'Billing City', 'Billing State', 'Billing Country',
         'Billing Code', 'Billing Phone', 'Billing Fax', 'Shipping Attention', 'Shipping Address',
         'Shipping Street2', 'Shipping City', 'Shipping State', 'Shipping Country',
-        'Shipping Code', 'Shipping Phone', 'Shipping Fax', 'Source', 'Owner Name', 'Primary Contact ID',
+        'Shipping Code', 'Shipping Phone', 'Shipping Fax', 'Source', 'Last Sync Time', 'Owner Name', 'Primary Contact ID',
         'Beneficiary Name', 'Vendor Bank Account Number', 'Vendor Bank Name', 'Vendor Bank Code'
     ]
     for col in string_cols:
@@ -232,12 +263,12 @@ def process_vendors(df):
         if col in df_cleaned.columns:
             df_cleaned = clean_numeric_column(df_cleaned, col)
 
-    df_cleaned['Tally_Billing_Address_Line1'] = df_cleaned['Billing Address'].fillna('')
-    df_cleaned['Tally_Billing_Address_Line2'] = df_cleaned['Billing Street2'].fillna('')
-    df_cleaned['Tally_Shipping_Address_Line1'] = df_cleaned['Shipping Address'].fillna('')
-    df_cleaned['Tally_Shipping_Address_Line2'] = df_cleaned['Shipping Street2'].fillna('')
-    df_cleaned['Tally_Billing_State'] = df_cleaned['Billing State']
-    df_cleaned['Tally_Shipping_State'] = df_cleaned['Shipping State']
+    df_cleaned['Tally_Billing_Address_Line1'] = df_cleaned['Billing Address'].fillna('') if 'Billing Address' in df_cleaned.columns else ''
+    df_cleaned['Tally_Billing_Address_Line2'] = df_cleaned['Billing Street2'].fillna('') if 'Billing Street2' in df_cleaned.columns else ''
+    df_cleaned['Tally_Shipping_Address_Line1'] = df_cleaned['Shipping Address'].fillna('') if 'Shipping Address' in df_cleaned.columns else ''
+    df_cleaned['Tally_Shipping_Address_Line2'] = df_cleaned['Shipping Street2'].fillna('') if 'Shipping Street2' in df_cleaned.columns else ''
+    df_cleaned['Tally_Billing_State'] = df_cleaned['Billing State'] if 'Billing State' in df_cleaned.columns else ''
+    df_cleaned['Tally_Shipping_State'] = df_cleaned['Shipping State'] if 'Shipping State' in df_cleaned.columns else ''
 
     df_processed = df_cleaned.rename(columns={
         'Display Name': 'Tally_Party_Name',
@@ -248,9 +279,9 @@ def process_vendors(df):
         'Vendor Bank Account Number': 'Tally_Bank_Account_No',
         'Vendor Bank Name': 'Tally_Bank_Name',
         'Vendor Bank Code': 'Tally_IFSC_Code'
-    })
+    }, errors='ignore')
 
-    df_final = df_processed[[
+    final_cols_vendors = [
         'Contact ID', 'Tally_Party_Name', 'Company Name', 'Tally_Email',
         'Tally_Phone', 'Tally_Mobile', 'Tally_GSTIN',
         'Tally_Billing_Address_Line1', 'Tally_Billing_Address_Line2', 'Billing City',
@@ -259,7 +290,10 @@ def process_vendors(df):
         'Tally_Shipping_State', 'Shipping Country', 'Shipping Code',
         'Opening Balance', 'Status', 'GST Treatment',
         'Tally_Bank_Account_No', 'Tally_Bank_Name', 'Tally_IFSC_Code'
-    ]].copy()
+    ]
+    final_cols_vendors = [col for col in final_cols_vendors if col in df_processed.columns]
+
+    df_final = df_processed[final_cols_vendors].copy()
     st.success(f"Processed {len(df_final)} Vendors entries.")
     return df_final
 
@@ -288,44 +322,54 @@ def process_invoices(df):
             df_cleaned = clean_numeric_column(df_cleaned, col)
 
     string_cols = [
-        'Invoice Number', 'Invoice Status', 'Customer Name', 'Place of Supply',
-        'Place of Supply(With State Code)', 'GST Treatment', 'PurchaseOrder',
-        'Discount Type', 'Template Name', 'TCS Tax Name', 'TDS Calculation Type',
-        'TDS Name', 'TDS Section Code', 'TDS Section', 'Adjustment Description',
-        'Payment Terms', 'Payment Terms Label', 'Notes', 'Terms & Conditions',
-        'E-WayBill Number', 'E-WayBill Status', 'Transporter Name', 'Transporter ID',
-        'Invoice Type', 'Location Name', 'Shipping Charge Tax ID', 'Shipping Charge Tax Name',
-        'Shipping Charge Tax Type', 'Shipping Charge Tax Exemption Code', 'Shipping Charge SAC Code',
-        'Item Name', 'Item Desc', 'Usage unit', 'Product ID', 'Brand', 'Sales Order Number',
-        'subscription_id', 'Expense Reference ID', 'Recurrence Name',
+        'Invoice Date', 'Invoice ID', 'Invoice Number', 'Invoice Status', 'Customer ID', 'Customer Name',
+        'Place of Supply', 'Place of Supply(With State Code)', 'GST Treatment', 'Is Inclusive Tax', 'Due Date',
+        'PurchaseOrder', 'Currency Code', 'Exchange Rate', 'Discount Type', 'Is Discount Before Tax',
+        'Template Name', 'Entity Discount Percent', 'TCS Tax Name', 'TCS Percentage',
+        'TDS Calculation Type', 'TDS Name', 'TDS Percentage', 'TDS Section Code', 'TDS Section', 'TDS Amount',
+        'SubTotal', 'Total', 'Balance', 'Adjustment', 'Adjustment Description', 'Expected Payment Date',
+        'Last Payment Date', 'Payment Terms', 'Payment Terms Label', 'Notes', 'Terms & Conditions',
+        'E-WayBill Number', 'E-WayBill Generated Time', 'E-WayBill Status', 'E-WayBill Cancelled Time', 'E-WayBill Expired Time',
+        'Transporter Name', 'Transporter ID', 'TCS Amount', 'Invoice Type', 'Entity Discount Amount',
+        'Location ID', 'Location Name', 'Shipping Charge', 'Shipping Charge Tax ID', 'Shipping Charge Tax Amount',
+        'Shipping Charge Tax Name', 'Shipping Charge Tax %', 'Shipping Charge Tax Type',
+        'Shipping Charge Tax Exemption Code', 'Shipping Charge SAC Code', 'Item Name', 'Item Desc', 'Quantity',
+        'Discount', 'Discount Amount', 'Item Total', 'Usage unit', 'Item Price', 'Product ID', 'Brand',
+        'Sales Order Number', 'subscription_id', 'Expense Reference ID', 'Recurrence Name',
+        'PayPal', 'Authorize.Net', 'Google Checkout', 'Payflow Pro', 'Stripe', 'Paytm', '2Checkout',
+        'Braintree', 'Forte', 'WorldPay', 'Payments Pro', 'Square', 'WePay', 'Razorpay',
+        'ICICI EazyPay', 'GoCardless', 'Partial Payments', # Payment gateway fields
         'Billing Attention', 'Billing Address', 'Billing Street2', 'Billing City',
         'Billing State', 'Billing Country', 'Billing Code', 'Billing Phone', 'Billing Fax',
         'Shipping Attention', 'Shipping Address', 'Shipping Street2', 'Shipping City',
         'Shipping State', 'Shipping Country', 'Shipping Code', 'Shipping Fax',
         'Shipping Phone Number', 'Supplier Org Name', 'Supplier GST Registration Number',
         'Supplier Street Address', 'Supplier City', 'Supplier State', 'Supplier Country',
-        'Supplier ZipCode', 'Supplier Phone', 'Supplier E-Mail', 'Reverse Charge Tax Name',
-        'Reverse Charge Tax Type', 'Item TDS Name', 'Item TDS Section Code', 'Item TDS Section',
-        'Nature Of Collection', 'SKU', 'Project ID', 'Project Name', 'HSN/SAC',
-        'Sales person', 'Subject', 'Primary Contact EmailID', 'Primary Contact Mobile',
+        'Supplier ZipCode', 'Supplier Phone', 'Supplier E-Mail', 'CGST Rate %', 'SGST Rate %',
+        'IGST Rate %', 'CESS Rate %', 'CGST(FCY)', 'SGST(FCY)', 'IGST(FCY)', 'CESS(FCY)', 'CGST', 'SGST', 'IGST', 'CESS',
+        'Reverse Charge Tax Name', 'Reverse Charge Tax Rate', 'Reverse Charge Tax Type', 'Item TDS Name',
+        'Item TDS Percentage', 'Item TDS Amount', 'Item TDS Section Code', 'Item TDS Section',
+        'GST Identification Number (GSTIN)', 'Nature Of Collection', 'SKU', 'Project ID', 'Project Name', 'HSN/SAC',
+        'Round Off', 'Sales person', 'Subject', 'Primary Contact EmailID', 'Primary Contact Mobile',
         'Primary Contact Phone', 'Estimate Number', 'Item Type', 'Custom Charges',
-        'Shipping Bill#', 'PortCode', 'Reference Invoice#', 'Reference Invoice Type',
+        'Shipping Bill#', 'Shipping Bill Date', 'Shipping Bill Total', 'PortCode', 'Reference Invoice#', 'Reference Invoice Date', 'Reference Invoice Type',
         'GST Registration Number(Reference Invoice)', 'Reason for issuing Debit Note',
         'E-Commerce Operator Name', 'E-Commerce Operator GSTIN', 'Account',
         'Account Code', 'Line Item Location Name', 'Supply Type', 'Tax ID',
-        'Item Tax Type', 'Item Tax Exemption Reason', 'Kit Combo Item Name', 'CF.Brand Name'
+        'Item Tax', 'Item Tax %', 'Item Tax Amount', 'Item Tax Type', 'Item Tax Exemption Reason', 'Kit Combo Item Name', 'CF.Brand Name'
     ]
     for col in string_cols:
         if col in df_cleaned.columns:
             df_cleaned[col] = df_cleaned[col].fillna('').astype(str)
 
-    df_cleaned['Tally_Sales_Ledger_Name'] = df_cleaned['Account'].fillna('Sales Account')
+    df_cleaned['Tally_Sales_Ledger_Name'] = df_cleaned['Account'].fillna('Sales Account') if 'Account' in df_cleaned.columns else 'Sales Account'
     df_cleaned['Tally_Output_CGST_Ledger'] = 'Output CGST'
     df_cleaned['Tally_Output_SGST_Ledger'] = 'Output SGST'
     df_cleaned['Tally_Output_IGST_Ledger'] = 'Output IGST'
     df_cleaned['Tally_Round_Off_Ledger'] = 'Round Off'
 
-    df_cleaned['Customer ID'] = df_cleaned['Customer ID'].fillna('').astype(str)
+    if 'Customer ID' in df_cleaned.columns:
+        df_cleaned['Customer ID'] = df_cleaned['Customer ID'].fillna('').astype(str)
 
     st.success(f"Processed {len(df_cleaned)} Invoices entries (including line items).")
     return df_cleaned
@@ -349,12 +393,12 @@ def process_customer_payments(df):
             df_cleaned = clean_numeric_column(df_cleaned, col)
 
     string_cols = [
-        'Payment Number', 'Mode', 'Description', 'Currency Code', 'Branch ID',
+        'Payment Number', 'CustomerPayment ID', 'Mode', 'CustomerID', 'Description', 'Currency Code', 'Branch ID',
         'Payment Number Prefix', 'Payment Number Suffix', 'Customer Name',
         'Place of Supply', 'Place of Supply(With State Code)', 'GST Treatment',
         'GST Identification Number (GSTIN)', 'Description of Supply', 'Tax Name',
         'Tax Type', 'Payment Type', 'Location Name', 'Deposit To',
-        'Deposit To Account Code', 'Tax Account', 'Invoice Number'
+        'Deposit To Account Code', 'Tax Account', 'InvoicePayment ID', 'Invoice Number'
     ]
     for col in string_cols:
         if col in df_cleaned.columns:
@@ -362,8 +406,10 @@ def process_customer_payments(df):
 
     df_cleaned['Tally_Deposit_Ledger'] = df_cleaned['Deposit To'].apply(
         lambda x: x if x else 'Cash-in-Hand'
-    )
-    df_cleaned['CustomerID'] = df_cleaned['CustomerID'].fillna('').astype(str)
+    ) if 'Deposit To' in df_cleaned.columns else 'Cash-in-Hand'
+    
+    if 'CustomerID' in df_cleaned.columns:
+        df_cleaned['CustomerID'] = df_cleaned['CustomerID'].fillna('').astype(str)
 
     st.success(f"Processed {len(df_cleaned)} Customer Payments entries.")
     return df_cleaned
@@ -387,7 +433,7 @@ def process_vendor_payments(df):
             df_cleaned = clean_numeric_column(df_cleaned, col)
 
     string_cols = [
-        'Payment Number', 'Payment Number Prefix', 'Payment Number Suffix',
+        'Payment Number', 'Payment Number Prefix', 'Payment Number Suffix', 'VendorPayment ID',
         'Mode', 'Description', 'Reference Number', 'Currency Code', 'Branch ID',
         'Payment Status', 'Payment Type', 'Location Name', 'Vendor Name',
         'Debit A/c no', 'Vendor Bank Account Number', 'Vendor Bank Name',
@@ -396,7 +442,7 @@ def process_vendor_payments(df):
         'Description of Supply', 'Paid Through', 'Paid Through Account Code',
         'Tax Account', 'ReverseCharge Tax Type', 'ReverseCharge Tax Name',
         'TDS Name', 'TDS Section Code', 'TDS Section', 'TDS Account Name',
-        'Bank Reference Number', 'PIPayment ID', 'Bill Number'
+        'Bank Reference Number', 'PIPayment ID', 'Bill Number', 'Withholding Tax Amount (BCY)'
     ]
     for col in string_cols:
         if col in df_cleaned.columns:
@@ -404,7 +450,7 @@ def process_vendor_payments(df):
 
     df_cleaned['Tally_Paid_Through_Ledger'] = df_cleaned['Paid Through'].apply(
         lambda x: x if x else 'Cash-in-Hand'
-    )
+    ) if 'Paid Through' in df_cleaned.columns else 'Cash-in-Hand'
     st.success(f"Processed {len(df_cleaned)} Vendor Payments entries.")
     return df_cleaned
 
@@ -431,16 +477,16 @@ def process_credit_notes(df):
             df_cleaned = clean_numeric_column(df_cleaned, col)
 
     string_cols = [
-        'Product ID', 'Credit Note Number', 'Credit Note Status', 'Customer Name',
+        'Product ID', 'CreditNotes ID', 'Credit Note Number', 'Credit Note Status', 'Customer Name',
         'Billing Attention', 'Billing Address', 'Billing Street 2', 'Billing City',
         'Billing State', 'Billing Country', 'Billing Code', 'Billing Phone', 'Billing Fax',
         'Shipping Attention', 'Shipping Address', 'Shipping Street 2', 'Shipping City',
         'Shipping State', 'Shipping Country', 'Shipping Phone', 'Shipping Code', 'Shipping Fax',
-        'Currency Code', 'Notes', 'Terms & Conditions', 'Reference#', 'Shipping Charge Tax ID',
+        'Customer ID', 'Currency Code', 'Notes', 'Terms & Conditions', 'Reference#', 'Shipping Charge Tax ID',
         'Shipping Charge Tax Name', 'Shipping Charge Tax Type', 'Shipping Charge Tax Exemption Code',
         'Shipping Charge SAC Code', 'Branch ID', 'Associated Invoice Number', 'TDS Name',
         'TDS Section Code', 'TDS Section', 'E-WayBill Number', 'E-WayBill Status',
-        'Transporter Name', 'Transporter ID', 'Item Name', 'Item Desc', 'Usage unit',
+        'Transporter Name', 'Transporter ID', 'Is Discount Before Tax', 'Item Name', 'Item Desc', 'Usage unit',
         'Location Name', 'Reason', 'Project ID', 'Project Name', 'Supplier Org Name',
         'Supplier GST Registration Number', 'Supplier Street Address', 'Supplier City',
         'Supplier State', 'Supplier Country', 'Supplier ZipCode', 'Supplier Phone',
@@ -456,11 +502,13 @@ def process_credit_notes(df):
         if col in df_cleaned.columns:
             df_cleaned[col] = df_cleaned[col].fillna('').astype(str)
 
-    df_cleaned['Tally_Sales_Return_Ledger'] = df_cleaned['Account'].fillna('Sales Returns')
+    df_cleaned['Tally_Sales_Return_Ledger'] = df_cleaned['Account'].fillna('Sales Returns') if 'Account' in df_cleaned.columns else 'Sales Returns'
     df_cleaned['Tally_Output_CGST_Ledger'] = 'Output CGST'
     df_cleaned['Tally_Output_SGST_Ledger'] = 'Output SGST'
     df_cleaned['Tally_Output_IGST_Ledger'] = 'Output IGST'
-    df_cleaned['Customer ID'] = df_cleaned['Customer ID'].fillna('').astype(str)
+    
+    if 'Customer ID' in df_cleaned.columns:
+        df_cleaned['Customer ID'] = df_cleaned['Customer ID'].fillna('').astype(str)
 
     st.success(f"Processed {len(df_cleaned)} Credit Notes entries.")
     return df_cleaned
@@ -482,7 +530,7 @@ def process_journals(df):
     string_cols = [
         'Journal Number', 'Journal Number Prefix', 'Journal Number Suffix',
         'Journal Created By', 'Journal Type', 'Status', 'Journal Entity Type',
-        'Reference Number', 'Notes', 'Location ID', 'Location Name', 'Item Order',
+        'Reference Number', 'Notes', 'Is Inclusive Tax', 'Location ID', 'Location Name', 'Item Order',
         'Tax Name', 'Tax Type', 'Project Name', 'Account', 'Account Code',
         'Contact Name', 'Currency', 'Description'
     ]
@@ -515,27 +563,32 @@ def process_bills(df):
             df_cleaned = clean_numeric_column(df_cleaned, col)
 
     string_cols = [
-        'Vendor Name', 'Payment Terms', 'Payment Terms Label', 'Bill Number',
-        'PurchaseOrder', 'Currency Code', 'Vendor Notes', 'Terms & Conditions',
-        'Adjustment Description', 'Branch ID', 'Branch Name', 'Location Name',
-        'Submitted By', 'Approved By', 'Bill Status', 'Created By', 'Product ID',
-        'Item Name', 'Account', 'Account Code', 'Description', 'Reference Invoice Type',
+        'Bill Date', 'Due Date', 'Bill ID', 'Vendor Name', 'Entity Discount Percent',
+        'Payment Terms', 'Payment Terms Label', 'Bill Number', 'PurchaseOrder',
+        'Currency Code', 'Exchange Rate', 'SubTotal', 'Total', 'Balance', 'TCS Amount',
+        'Vendor Notes', 'Terms & Conditions', 'Adjustment', 'Adjustment Description',
+        'Branch ID', 'Branch Name', 'Location Name', 'Is Inclusive Tax', 'Submitted By',
+        'Approved By', 'Submitted Date', 'Approved Date', 'Bill Status', 'Created By',
+        'Product ID', 'Item Name', 'Account', 'Account Code', 'Description', 'Quantity',
+        'Usage unit', 'Tax Amount', 'Item Total', 'Is Billable', 'Reference Invoice Type',
         'Source of Supply', 'Destination of Supply', 'GST Treatment',
         'GST Identification Number (GSTIN)', 'TDS Calculation Type', 'TDS TaxID',
-        'TDS Name', 'TDS Section Code', 'TDS Section', 'TCS Tax Name',
-        'Nature Of Collection', 'SKU', 'Line Item Location Name', 'Discount Type',
-        'HSN/SAC', 'Purchase Order Number', 'Tax ID', 'Tax Name', 'Tax Type',
-        'Item TDS Name', 'Item TDS Section Code', 'Item TDS Section',
+        'TDS Name', 'TDS Percentage', 'TDS Section Code', 'TDS Section', 'TDS Amount',
+        'TCS Tax Name', 'TCS Percentage', 'Nature Of Collection', 'SKU',
+        'Line Item Location Name', 'Rate', 'Discount Type', 'Is Discount Before Tax',
+        'Discount', 'Discount Amount', 'HSN/SAC', 'Purchase Order Number', 'Tax ID',
+        'Tax Name', 'Tax Percentage', 'Tax Type', 'Item TDS Name', 'Item TDS Percentage',
+        'Item TDS Amount', 'Item TDS Section Code', 'Item TDS Section',
         'Item Exemption Code', 'Item Type', 'Reverse Charge Tax Name',
         'Reverse Charge Tax Rate', 'Reverse Charge Tax Type', 'Supply Type',
-        'ITC Eligibility', 'Discount Account', 'Discount Account Code',
-        'Customer Name', 'Project Name'
+        'ITC Eligibility', 'Entity Discount Amount', 'Discount Account',
+        'Discount Account Code', 'Is Landed Cost', 'Customer Name', 'Project Name'
     ]
     for col in string_cols:
         if col in df_cleaned.columns:
             df_cleaned[col] = df_cleaned[col].fillna('').astype(str)
 
-    df_cleaned['Tally_Purchase_Ledger_Name'] = df_cleaned['Account'].fillna('Purchase Account')
+    df_cleaned['Tally_Purchase_Ledger_Name'] = df_cleaned['Account'].fillna('Purchase Account') if 'Account' in df_cleaned.columns else 'Purchase Account'
     df_cleaned['Tally_Input_CGST_Ledger'] = 'Input CGST'
     df_cleaned['Tally_Input_SGST_Ledger'] = 'Input SGST'
     df_cleaned['Tally_Input_IGST_Ledger'] = 'Input IGST'
@@ -544,7 +597,7 @@ def process_bills(df):
     st.success(f"Processed {len(df_cleaned)} Bills entries.")
     return df_cleaned
 
-# --- XML Generation Functions (from 03_generate_tally_xml.py) ---
+# --- XML Generation Functions ---
 
 def generate_ledgers_xml(df_coa):
     st.info("Generating Ledgers XML...")
@@ -568,13 +621,13 @@ def generate_ledgers_xml(df_coa):
 
         parent_group_for_new_group = "Primary" if group_name not in known_tally_primary_groups else ""
 
-        group_xml = etree.SubElement(tally_message, "GROUP", NAME=group_name, ACTION="CREATE")
-        etree.SubElement(group_xml, "NAME").text = group_name
+        group_xml = etree.SubElement(tally_message, "GROUP", NAME=safe_str(group_name), ACTION="CREATE")
+        etree.SubElement(group_xml, "NAME").text = safe_str(group_name)
         if parent_group_for_new_group:
             etree.SubElement(group_xml, "PARENT").text = parent_group_for_new_group
         etree.SubElement(group_xml, "ISADDABLE").text = "Yes"
         etree.SubElement(group_xml, "LANGUAGENAME.LIST").append(
-            etree.fromstring(f"<NAME.LIST><NAME>{group_name}</NAME></NAME.LIST>")
+            etree.fromstring(f"<NAME.LIST><NAME>{safe_str(group_name)}</NAME></NAME.LIST>")
         )
 
     for index, row in df_coa.iterrows():
@@ -591,14 +644,21 @@ def generate_ledgers_xml(df_coa):
         ledger_xml = etree.SubElement(tally_message, "LEDGER", NAME=ledger_name, ACTION="CREATE")
         etree.SubElement(ledger_xml, "NAME").text = ledger_name
         etree.SubElement(ledger_xml, "PARENT").text = parent_group
-        etree.SubElement(ledger_xml, "OPENINGBALANCE").text = format_tally_amount(row.get('Opening Balance', 0.0))
+        
+        # Conditionally add Opening Balance if it exists in the processed DataFrame
+        if 'Opening Balance' in df_coa.columns:
+            etree.SubElement(ledger_xml, "OPENINGBALANCE").text = format_tally_amount(row.get('Opening Balance', 0.0))
+        else:
+            # Default to 0.00 if column not present (as per original Tally XML expectation if not explicitly given)
+            etree.SubElement(ledger_xml, "OPENINGBALANCE").text = "0.00" 
+            
         etree.SubElement(ledger_xml, "CURRENCYID").text = BASE_CURRENCY_NAME
 
-        if row['Account Type'] == 'Bank':
+        if safe_str(row.get('Account Type')) == 'Bank':
             etree.SubElement(ledger_xml, "ISBILLWISEON").text = "No"
             etree.SubElement(ledger_xml, "ISCASHLEDGER").text = "No"
             etree.SubElement(ledger_xml, "ISBANKLEDGER").text = "Yes"
-        elif row['Account Type'] == 'Cash':
+        elif safe_str(row.get('Account Type')) == 'Cash':
             etree.SubElement(ledger_xml, "ISBILLWISEON").text = "No"
             etree.SubElement(ledger_xml, "ISCASHLEDGER").text = "Yes"
             etree.SubElement(ledger_xml, "ISBANKLEDGER").text = "No"
@@ -611,7 +671,7 @@ def generate_ledgers_xml(df_coa):
             etree.SubElement(ledger_xml, "DESCRIPTION").text = description
 
         etree.SubElement(ledger_xml, "LANGUAGENAME.LIST").append(
-            etree.fromstring(f"<NAME.LIST><NAME>{ledger_name}</NAME></NAME.LIST>")
+            etree.fromstring(f"<NAME.LIST><NAME>{safe_str(ledger_name)}</NAME></NAME.LIST>")
         )
     xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
     st.success("Generated Ledgers XML.")
@@ -623,27 +683,34 @@ def generate_contacts_vendors_xml(df_contacts, df_vendors):
 
     def add_address_details_to_party_xml(parent_element, row, is_shipping=False):
         prefix = "Shipping" if is_shipping else "Billing"
-        address1 = safe_str(row.get(f'Tally_{prefix}_Address_Line1'))
-        address2 = safe_str(row.get(f'Tally_{prefix}_Address_Line2'))
-        city = safe_str(row.get(f'{prefix} City'))
-        state = safe_str(row.get(f'Tally_{prefix}_State'))
-        country = safe_str(row.get(f'{prefix} Country')) or DEFAULT_COUNTRY
-        pincode = safe_str(row.get(f'{prefix} Code'))
+        
+        # Fetch values using .get() with default empty string
+        address1 = safe_str(row.get(f'Tally_{prefix}_Address_Line1', ''))
+        address2 = safe_str(row.get(f'Tally_{prefix}_Address_Line2', ''))
+        city = safe_str(row.get(f'{prefix} City', ''))
+        state = safe_str(row.get(f'Tally_{prefix}_State', ''))
+        country = safe_str(row.get(f'{prefix} Country', '')) or DEFAULT_COUNTRY
+        pincode = safe_str(row.get(f'{prefix} Code', ''))
 
-        if address1 or address2 or city or state or country or pincode:
-            address_list = etree.SubElement(parent_element, "ADDRESS.LIST")
-            if address1:
-                etree.SubElement(address_list, "ADDRESS").text = address1
-            if address2:
-                etree.SubElement(address_list, "ADDRESS").text = address2
-            if city:
-                etree.SubElement(parent_element, "CITY").text = city
-            if state:
-                etree.SubElement(parent_element, "STATENAME").text = state
-            if country:
-                etree.SubElement(parent_element, "COUNTRYNAME").text = country
-            if pincode:
-                etree.SubElement(parent_element, "PINCODE").text = pincode
+        address_added = False
+        address_list = etree.SubElement(parent_element, "ADDRESS.LIST") # Always create the list element
+        if address1:
+            etree.SubElement(address_list, "ADDRESS").text = address1
+            address_added = True
+        if address2:
+            etree.SubElement(address_list, "ADDRESS").text = address2
+            address_added = True
+        
+        # Only add city/state/country/pincode if they have values to avoid empty tags or issues
+        if city:
+            etree.SubElement(parent_element, "CITY").text = city
+        if state:
+            etree.SubElement(parent_element, "STATENAME").text = state
+        if country:
+            etree.SubElement(parent_element, "COUNTRYNAME").text = country
+        if pincode:
+            etree.SubElement(parent_element, "PINCODE").text = pincode
+
 
     if df_contacts is not None:
         for index, row in df_contacts.iterrows():
@@ -680,7 +747,7 @@ def generate_contacts_vendors_xml(df_contacts, df_vendors):
                     etree.SubElement(ledger_xml, "PLACEOFSUPPLY").text = place_of_supply_code.split('-')[0].strip()
 
             etree.SubElement(ledger_xml, "LANGUAGENAME.LIST").append(
-                etree.fromstring(f"<NAME.LIST><NAME>{party_name}</NAME></NAME.LIST>")
+                etree.fromstring(f"<NAME.LIST><NAME>{safe_str(party_name)}</NAME></NAME.LIST>")
             )
 
     if df_vendors is not None:
@@ -725,8 +792,9 @@ def generate_contacts_vendors_xml(df_contacts, df_vendors):
                     etree.SubElement(bank_details, "IFSCCODE").text = ifsc_code
 
             etree.SubElement(ledger_xml, "LANGUAGENAME.LIST").append(
-                etree.fromstring(f"<NAME.LIST><NAME>{party_name}</NAME></NAME.LIST>")
+                etree.fromstring(f"<NAME.LIST><NAME>{safe_str(party_name)}</NAME></NAME.LIST>")
             )
+
     xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
     st.success("Generated Contacts and Vendors XML.")
     return xml_string
@@ -743,7 +811,6 @@ def generate_sales_vouchers_xml(df_invoices):
     for invoice_id, group in grouped_invoices:
         header = group.iloc[0]
         
-        # Ensure 'Total' is numeric and not NaN for comparison
         total_amount = header.get('Total', 0.0)
         if pd.isna(total_amount):
             total_amount = 0.0
@@ -753,19 +820,19 @@ def generate_sales_vouchers_xml(df_invoices):
                                    VCHTYPE="Sales",
                                    ACTION="CREATE")
 
-        etree.SubElement(voucher, "DATE").text = format_tally_date(header['Invoice Date'])
-        etree.SubElement(voucher, "GUID").text = f"SAL-{safe_str(header['Invoice ID'])}"
+        etree.SubElement(voucher, "DATE").text = format_tally_date(header.get('Invoice Date', ''))
+        etree.SubElement(voucher, "GUID").text = f"SAL-{safe_str(header.get('Invoice ID', ''))}"
         etree.SubElement(voucher, "VOUCHERTYPENAME").text = "Sales"
-        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(header['Invoice Number'])
-        etree.SubElement(voucher, "PARTYLEDGERNAME").text = safe_str(header['Customer Name'])
-        etree.SubElement(voucher, "BASICBUYERNAME").text = safe_str(header['Customer Name'])
+        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(header.get('Invoice Number', ''))
+        etree.SubElement(voucher, "PARTYLEDGERNAME").text = safe_str(header.get('Customer Name', ''))
+        etree.SubElement(voucher, "BASICBUYERNAME").text = safe_str(header.get('Customer Name', ''))
         etree.SubElement(voucher, "PERSISTEDVIEW").text = "Accounting Voucher"
         place_supply_code = safe_str(header.get('Place of Supply(With State Code)', '')).split('-')[0].strip()
         if place_supply_code:
             etree.SubElement(voucher, "PLACEOFSUPPLY").text = place_supply_code
 
         buyer_details = etree.SubElement(voucher, "BUYERDETAILS.LIST")
-        etree.SubElement(buyer_details, "CONSNAME").text = safe_str(header['Customer Name'])
+        etree.SubElement(buyer_details, "CONSNAME").text = safe_str(header.get('Customer Name', ''))
         cons_address_list = etree.SubElement(buyer_details, "ADDRESS.LIST")
         address_found = False
         if safe_str(header.get('Shipping Address')):
@@ -789,20 +856,20 @@ def generate_sales_vouchers_xml(df_invoices):
             etree.SubElement(buyer_details, "GSTREGISTRATIONTYPE").text = safe_str(header.get('GST Treatment', 'Regular'))
             etree.SubElement(buyer_details, "GSTIN").text = gstin
         
-        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(header['Invoice Date'])
+        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(header.get('Invoice Date', ''))
         etree.SubElement(voucher, "NARRATION").text = safe_str(header.get('Notes', ''))
         
         all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
 
         # Credit the Party Ledger (Customer)
         party_ledger_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-        etree.SubElement(party_ledger_entry, "LEDGERNAME").text = safe_str(header['Customer Name'])
+        etree.SubElement(party_ledger_entry, "LEDGERNAME").text = safe_str(header.get('Customer Name', ''))
         etree.SubElement(party_ledger_entry, "ISDEEMEDPOSITIVE").text = "No"
         etree.SubElement(party_ledger_entry, "AMOUNT").text = format_tally_amount(-total_amount)
         
         bill_allocation_list = etree.SubElement(party_ledger_entry, "BILLALLOCATIONS.LIST")
         bill_allocation = etree.SubElement(bill_allocation_list, "BILLALLOCATIONS")
-        etree.SubElement(bill_allocation, "NAME").text = safe_str(header['Invoice Number'])
+        etree.SubElement(bill_allocation, "NAME").text = safe_str(header.get('Invoice Number', ''))
         etree.SubElement(bill_allocation, "BILLTYPE").text = "New Ref"
         etree.SubElement(bill_allocation, "AMOUNT").text = format_tally_amount(-total_amount)
 
@@ -861,7 +928,7 @@ def generate_customer_payments_xml(df_payments):
     envelope, tally_message = create_tally_envelope("Vouchers", "VOUCHERS")
 
     for index, row in df_payments.iterrows():
-        payment_id = safe_str(row['CustomerPayment ID'])
+        payment_id = safe_str(row.get('CustomerPayment ID', ''))
         if not payment_id:
             st.warning(f"Skipping customer payment due to empty ID: Row {index+2}")
             continue
@@ -874,13 +941,13 @@ def generate_customer_payments_xml(df_payments):
                                    VCHTYPE="Receipt",
                                    ACTION="CREATE")
 
-        etree.SubElement(voucher, "DATE").text = format_tally_date(row['Date'])
+        etree.SubElement(voucher, "DATE").text = format_tally_date(row.get('Date', ''))
         etree.SubElement(voucher, "GUID").text = f"RCP-{payment_id}"
         etree.SubElement(voucher, "VOUCHERTYPENAME").text = "Receipt"
-        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(row['Payment Number'])
+        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(row.get('Payment Number', ''))
         etree.SubElement(voucher, "NARRATION").text = safe_str(row.get('Description', 'Customer Payment'))
         etree.SubElement(voucher, "BASICBASECURRENTBAL").text = format_tally_amount(amount)
-        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(row['Date'])
+        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(row.get('Date', ''))
 
         all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
 
@@ -890,7 +957,7 @@ def generate_customer_payments_xml(df_payments):
         etree.SubElement(debit_bank_cash, "AMOUNT").text = format_tally_amount(amount)
 
         credit_customer = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-        etree.SubElement(credit_customer, "LEDGERNAME").text = safe_str(row['Customer Name'])
+        etree.SubElement(credit_customer, "LEDGERNAME").text = safe_str(row.get('Customer Name', ''))
         etree.SubElement(credit_customer, "ISDEEMEDPOSITIVE").text = "No"
         etree.SubElement(credit_customer, "AMOUNT").text = format_tally_amount(-amount)
 
@@ -917,7 +984,7 @@ def generate_vendor_payments_xml(df_payments):
     envelope, tally_message = create_tally_envelope("Vouchers", "VOUCHERS")
 
     for index, row in df_payments.iterrows():
-        payment_id = safe_str(row['VendorPayment ID'])
+        payment_id = safe_str(row.get('VendorPayment ID', ''))
         if not payment_id:
             st.warning(f"Skipping vendor payment due to empty ID: Row {index+2}")
             continue
@@ -930,18 +997,18 @@ def generate_vendor_payments_xml(df_payments):
                                    VCHTYPE="Payment",
                                    ACTION="CREATE")
 
-        etree.SubElement(voucher, "DATE").text = format_tally_date(row['Date'])
+        etree.SubElement(voucher, "DATE").text = format_tally_date(row.get('Date', ''))
         etree.SubElement(voucher, "GUID").text = f"PAY-{payment_id}"
         etree.SubElement(voucher, "VOUCHERTYPENAME").text = "Payment"
-        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(row['Payment Number'])
+        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(row.get('Payment Number', ''))
         etree.SubElement(voucher, "NARRATION").text = safe_str(row.get('Description', 'Vendor Payment'))
         etree.SubElement(voucher, "BASICBASECURRENTBAL").text = format_tally_amount(amount)
-        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(row['Date'])
+        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(row.get('Date', ''))
 
         all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
 
         debit_vendor = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-        etree.SubElement(debit_vendor, "LEDGERNAME").text = safe_str(row['Vendor Name'])
+        etree.SubElement(debit_vendor, "LEDGERNAME").text = safe_str(row.get('Vendor Name', ''))
         etree.SubElement(debit_vendor, "ISDEEMEDPOSITIVE").text = "Yes"
         etree.SubElement(debit_vendor, "AMOUNT").text = format_tally_amount(amount)
 
@@ -981,37 +1048,34 @@ def generate_credit_notes_xml(df_credit_notes):
         if pd.isna(total_amount): total_amount = 0.0
 
         voucher = etree.SubElement(tally_message, "VOUCHER",
-                                   REMOTEID=safe_str(header['CreditNotes ID']),
+                                   REMOTEID=safe_str(header.get('CreditNotes ID', '')),
                                    VCHTYPE="Credit Note",
                                    ACTION="CREATE")
 
-        etree.SubElement(voucher, "DATE").text = format_tally_date(header['Credit Note Date'])
-        etree.SubElement(voucher, "GUID").text = f"CRN-{safe_str(header['CreditNotes ID'])}"
+        etree.SubElement(voucher, "DATE").text = format_tally_date(header.get('Credit Note Date', ''))
+        etree.SubElement(voucher, "GUID").text = f"CRN-{safe_str(header.get('CreditNotes ID', ''))}"
         etree.SubElement(voucher, "VOUCHERTYPENAME").text = "Credit Note"
-        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(header['Credit Note Number'])
-        etree.SubElement(voucher, "PARTYLEDGERNAME").text = safe_str(header['Customer Name'])
+        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(header.get('Credit Note Number', ''))
+        etree.SubElement(voucher, "PARTYLEDGERNAME").text = safe_str(header.get('Customer Name', ''))
         etree.SubElement(voucher, "NARRATION").text = safe_str(header.get('Reason', 'Credit Note issued'))
-        etree.SubElement(voucher, "BASICBUYERNAME").text = safe_str(header['Customer Name'])
-        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(header['Credit Note Date'])
+        etree.SubElement(voucher, "BASICBUYERNAME").text = safe_str(header.get('Customer Name', ''))
+        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(header.get('Credit Note Date', ''))
         etree.SubElement(voucher, "ISORIGINAL").text = "Yes"
 
         buyer_details = etree.SubElement(voucher, "BUYERDETAILS.LIST")
-        etree.SubElement(buyer_details, "CONSNAME").text = safe_str(header['Customer Name'])
+        etree.SubElement(buyer_details, "CONSNAME").text = safe_str(header.get('Customer Name', ''))
         cons_address_list = etree.SubElement(buyer_details, "ADDRESS.LIST")
-        address_found = False
+        
+        # Check for existence of address columns before trying to access
         if safe_str(header.get('Shipping Address')):
             etree.SubElement(cons_address_list, "ADDRESS").text = safe_str(header.get('Shipping Address'))
             if safe_str(header.get('Shipping Street 2')):
                 etree.SubElement(cons_address_list, "ADDRESS").text = safe_str(header.get('Shipping Street 2'))
-            address_found = True
         elif safe_str(header.get('Billing Address')):
             etree.SubElement(cons_address_list, "ADDRESS").text = safe_str(header.get('Billing Address'))
             if safe_str(header.get('Billing Street 2')):
                 etree.SubElement(cons_address_list, "ADDRESS").text = safe_str(header.get('Billing Street 2'))
-            address_found = True
-        if not address_found:
-             etree.SubElement(cons_address_list, "ADDRESS").text = ""
-
+        
         etree.SubElement(buyer_details, "STATENAME").text = safe_str(header.get('Shipping State', '') or header.get('Billing State', '') or '')
         etree.SubElement(buyer_details, "COUNTRYNAME").text = safe_str(header.get('Shipping Country', '') or header.get('Billing Country', '') or DEFAULT_COUNTRY)
 
@@ -1065,7 +1129,7 @@ def generate_credit_notes_xml(df_credit_notes):
                 etree.SubElement(gst_entry_sgst, "AMOUNT").text = format_tally_amount(-sgst_amount)
         
         credit_customer = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-        etree.SubElement(credit_customer, "LEDGERNAME").text = safe_str(header['Customer Name'])
+        etree.SubElement(credit_customer, "LEDGERNAME").text = safe_str(header.get('Customer Name', ''))
         etree.SubElement(credit_customer, "ISDEEMEDPOSITIVE").text = "No"
         etree.SubElement(credit_customer, "AMOUNT").text = format_tally_amount(-total_amount)
 
@@ -1097,12 +1161,13 @@ def generate_journal_vouchers_xml(df_journals):
                                    VCHTYPE="Journal",
                                    ACTION="CREATE")
 
-        etree.SubElement(voucher, "DATE").text = format_tally_date(header['Journal Date'])
+        etree.SubElement(voucher, "DATE").text = format_tally_date(header.get('Journal Date', ''))
         etree.SubElement(voucher, "GUID").text = f"JRN-{safe_str(journal_num)}"
         etree.SubElement(voucher, "VOUCHERTYPENAME").text = "Journal"
         etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(journal_num)
         etree.SubElement(voucher, "NARRATION").text = safe_str(header.get('Notes', 'Journal Entry'))
-        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(header['Journal Date'])
+        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(header.get('Journal Date', ''))
+
 
         all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
 
@@ -1110,11 +1175,10 @@ def generate_journal_vouchers_xml(df_journals):
         current_credit_total = 0.0
 
         for idx, entry_row in group.iterrows():
-            ledger_name = safe_str(entry_row['Account'])
+            ledger_name = safe_str(entry_row.get('Account', ''))
             debit_amount = entry_row.get('Debit', 0.0)
             credit_amount = entry_row.get('Credit', 0.0)
 
-            # Ensure amounts are numeric and not NaN
             if pd.isna(debit_amount): debit_amount = 0.0
             if pd.isna(credit_amount): credit_amount = 0.0
 
@@ -1154,22 +1218,22 @@ def generate_purchase_vouchers_xml(df_bills):
         if pd.isna(total_amount): total_amount = 0.0
 
         voucher = etree.SubElement(tally_message, "VOUCHER",
-                                   REMOTEID=safe_str(header['Bill ID']),
+                                   REMOTEID=safe_str(header.get('Bill ID', '')),
                                    VCHTYPE="Purchase",
                                    ACTION="CREATE")
 
-        etree.SubElement(voucher, "DATE").text = format_tally_date(header['Bill Date'])
-        etree.SubElement(voucher, "GUID").text = f"PUR-{safe_str(header['Bill ID'])}"
+        etree.SubElement(voucher, "DATE").text = format_tally_date(header.get('Bill Date', ''))
+        etree.SubElement(voucher, "GUID").text = f"PUR-{safe_str(header.get('Bill ID', ''))}"
         etree.SubElement(voucher, "VOUCHERTYPENAME").text = "Purchase"
-        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(header['Bill Number'])
-        etree.SubElement(voucher, "PARTYLEDGERNAME").text = safe_str(header['Vendor Name'])
-        etree.SubElement(voucher, "BASICSELLERNAME").text = safe_str(header['Vendor Name'])
+        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(header.get('Bill Number', ''))
+        etree.SubElement(voucher, "PARTYLEDGERNAME").text = safe_str(header.get('Vendor Name', ''))
+        etree.SubElement(voucher, "BASICSELLERNAME").text = safe_str(header.get('Vendor Name', ''))
         etree.SubElement(voucher, "PERSISTEDVIEW").text = "Accounting Voucher"
-        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(header['Bill Date'])
+        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(header.get('Bill Date', ''))
         etree.SubElement(voucher, "NARRATION").text = safe_str(header.get('Vendor Notes', ''))
         
         seller_details = etree.SubElement(voucher, "SELLERDETAILS.LIST")
-        etree.SubElement(seller_details, "CONSNAME").text = safe_str(header['Vendor Name'])
+        etree.SubElement(seller_details, "CONSNAME").text = safe_str(header.get('Vendor Name', ''))
         gstin = safe_str(header.get('GST Identification Number (GSTIN)'))
         if gstin:
             etree.SubElement(seller_details, "GSTREGISTRATIONTYPE").text = safe_str(header.get('GST Treatment', 'Regular'))
@@ -1178,13 +1242,13 @@ def generate_purchase_vouchers_xml(df_bills):
         all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
 
         credit_party = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-        etree.SubElement(credit_party, "LEDGERNAME").text = safe_str(header['Vendor Name'])
+        etree.SubElement(credit_party, "LEDGERNAME").text = safe_str(header.get('Vendor Name', ''))
         etree.SubElement(credit_party, "ISDEEMEDPOSITIVE").text = "No"
         etree.SubElement(credit_party, "AMOUNT").text = format_tally_amount(-total_amount)
         
         bill_allocation_list = etree.SubElement(credit_party, "BILLALLOCATIONS.LIST")
         bill_allocation = etree.SubElement(bill_allocation_list, "BILLALLOCATIONS")
-        etree.SubElement(bill_allocation, "NAME").text = safe_str(header['Bill Number'])
+        etree.SubElement(bill_allocation, "NAME").text = safe_str(header.get('Bill Number', ''))
         etree.SubElement(bill_allocation, "BILLTYPE").text = "New Ref"
         etree.SubElement(bill_allocation, "AMOUNT").text = format_tally_amount(-total_amount)
 
@@ -1247,112 +1311,189 @@ uploaded_file = st.file_uploader("Choose a Zoho backup ZIP file", type="zip")
 if uploaded_file is not None:
     st.success(f"File '{uploaded_file.name}' uploaded successfully.")
 
-    # Create a temporary directory for extraction
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_path = os.path.join(temp_dir, "zoho_extracted")
         os.makedirs(extract_path)
 
-        # Write the uploaded file to the temporary path
+        zip_temp_path = os.path.join(temp_dir, uploaded_file.name)
         try:
-            with open(os.path.join(temp_dir, uploaded_file.name), "wb") as f:
+            with open(zip_temp_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
-            zip_path = os.path.join(temp_dir, uploaded_file.name)
 
-            # --- Extraction (Simplified 01_extract.py logic) ---
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            st.info("Extracting ZIP file...")
+            with zipfile.ZipFile(zip_temp_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_path)
             st.info(f"Extracted Zoho ZIP to a temporary directory: {extract_path}")
 
-            # Verify extracted files
-            extracted_csv_paths = {}
+            raw_dfs = {}
             missing_files = []
+            st.info("Loading raw CSV files...")
             for zoho_csv_name in ZOHO_CSVS:
                 csv_path = os.path.join(extract_path, zoho_csv_name)
                 if os.path.exists(csv_path):
-                    extracted_csv_paths[zoho_csv_name] = csv_path
+                    try:
+                        raw_dfs[zoho_csv_name] = pd.read_csv(csv_path, encoding='utf-8', on_bad_lines='skip', low_memory=False)
+                        st.write(f"Loaded {zoho_csv_name} (raw). Rows: {len(raw_dfs[zoho_csv_name])}")
+                    except Exception as e:
+                        st.error(f"Error loading raw {zoho_csv_name}: {e}")
+                        st.exception(e) # Display full traceback for loading errors
+                        missing_files.append(zoho_csv_name) # Treat loading error as missing
                 else:
                     missing_files.append(zoho_csv_name)
             
             if missing_files:
-                st.warning(f"⚠️ Warning: The following crucial Zoho CSV files were not found in the ZIP: {', '.join(missing_files)}.")
-                st.warning("Generated XMLs might be incomplete or inaccurate. Please ensure your Zoho backup contains these files.")
+                st.warning(f"⚠️ Warning: The following crucial Zoho CSV files were not found or could not be loaded from the ZIP: {', '.join(missing_files)}. Generated XMLs might be incomplete or inaccurate.")
             else:
-                st.success("✅ All expected Zoho CSV files found.")
+                st.success("✅ All expected Zoho CSV files found and loaded.")
 
-            # --- Data Cleaning and Mapping (02_clean_map.py logic) ---
             st.header("2. Processing and Mapping Data")
             processed_dfs = {}
-            for key, filename in {
-                'chart_of_accounts': 'Chart_of_Accounts.csv',
-                'contacts': 'Contacts.csv',
-                'vendors': 'Vendors.csv',
-                'invoices': 'Invoice.csv',
-                'customer_payments': 'Customer_Payment.csv',
-                'vendor_payments': 'Vendor_Payment.csv',
-                'credit_notes': 'Credit_Note.csv',
-                'journals': 'Journal.csv',
-                'bills': 'Bill.csv',
-            }.items():
-                csv_file_path_in_zip = extracted_csv_paths.get(filename)
-                if csv_file_path_in_zip:
-                    try:
-                        # Load CSV directly from the extracted path
-                        df_raw = pd.read_csv(csv_file_path_in_zip, encoding='utf-8', on_bad_lines='skip', low_memory=False)
-                        
-                        # Call the appropriate processing function
-                        if key == 'chart_of_accounts':
-                            processed_dfs['coa'] = process_chart_of_accounts(df_raw)
-                        elif key == 'contacts':
-                            processed_dfs['contacts'] = process_contacts(df_raw)
-                        elif key == 'vendors':
-                            processed_dfs['vendors'] = process_vendors(df_raw)
-                        elif key == 'invoices':
-                            processed_dfs['invoices'] = process_invoices(df_raw)
-                        elif key == 'customer_payments':
-                            processed_dfs['customer_payments'] = process_customer_payments(df_raw)
-                        elif key == 'vendor_payments':
-                            processed_dfs['vendor_payments'] = process_vendor_payments(df_raw)
-                        elif key == 'credit_notes':
-                            processed_dfs['credit_notes'] = process_credit_notes(df_raw)
-                        elif key == 'journals':
-                            processed_dfs['journals'] = process_journals(df_raw)
-                        elif key == 'bills':
-                            processed_dfs['bills'] = process_bills(df_raw)
-                        st.write(f"Processed {filename}.")
-                    except Exception as e:
-                        st.error(f"Error processing {filename}: {e}")
-                else:
-                    st.warning(f"Skipping processing for {filename} as it was not found in the ZIP.")
+            
+            # --- Call processing functions with robust error handling ---
+            try:
+                processed_dfs['coa'] = process_chart_of_accounts(raw_dfs.get('Chart_of_Accounts.csv'))
+            except Exception as e:
+                st.error("Error during Chart of Accounts processing:")
+                st.exception(e)
 
-            # --- Generate Tally XMLs (03_generate_tally_xml.py logic) ---
+            try:
+                processed_dfs['contacts'] = process_contacts(raw_dfs.get('Contacts.csv'))
+            except Exception as e:
+                st.error("Error during Contacts processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['vendors'] = process_vendors(raw_dfs.get('Vendors.csv'))
+            except Exception as e:
+                st.error("Error during Vendors processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['invoices'] = process_invoices(raw_dfs.get('Invoice.csv'))
+            except Exception as e:
+                st.error("Error during Invoices processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['customer_payments'] = process_customer_payments(raw_dfs.get('Customer_Payment.csv'))
+            except Exception as e:
+                st.error("Error during Customer Payments processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['vendor_payments'] = process_vendor_payments(raw_dfs.get('Vendor_Payment.csv'))
+            except Exception as e:
+                st.error("Error during Vendor Payments processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['credit_notes'] = process_credit_notes(raw_dfs.get('Credit_Note.csv'))
+            except Exception as e:
+                st.error("Error during Credit Notes processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['journals'] = process_journals(raw_dfs.get('Journal.csv'))
+            except Exception as e:
+                st.error("Error during Journals processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['bills'] = process_bills(raw_dfs.get('Bill.csv'))
+            except Exception as e:
+                st.error("Error during Bills processing:")
+                st.exception(e)
+            
+            st.success("Data cleaning and mapping attempts complete. Check for any errors above.")
+
             st.header("3. Generate Tally XML Files")
             generated_xmls = {}
 
-            if 'coa' in processed_dfs and processed_dfs['coa'] is not None:
-                generated_xmls['tally_ledgers.xml'] = generate_ledgers_xml(processed_dfs['coa'])
+            # --- Generate XMLs in recommended order with error handling ---
+            try:
+                if processed_dfs.get('coa') is not None:
+                    generated_xmls['tally_ledgers.xml'] = generate_ledgers_xml(processed_dfs['coa'])
+                else:
+                    st.warning("Skipping Ledgers XML generation due to missing/errored Chart of Accounts data.")
+            except Exception as e:
+                st.error("Error generating Ledgers XML:")
+                st.exception(e)
             
-            if 'contacts' in processed_dfs and 'vendors' in processed_dfs and \
-               processed_dfs['contacts'] is not None and processed_dfs['vendors'] is not None:
-                generated_xmls['tally_contacts_vendors.xml'] = generate_contacts_vendors_xml(processed_dfs['contacts'], processed_dfs['vendors'])
+            try:
+                # Check for both contacts and vendors before attempting to generate combined XML
+                contacts_df_present = processed_dfs.get('contacts') is not None
+                vendors_df_present = processed_dfs.get('vendors') is not None
+                
+                if contacts_df_present and vendors_df_present:
+                    generated_xmls['tally_contacts_vendors.xml'] = generate_contacts_vendors_xml(processed_dfs['contacts'], processed_dfs['vendors'])
+                elif contacts_df_present:
+                    st.warning("Only Contacts data found. Attempting to generate contacts-only XML.")
+                    generated_xmls['tally_contacts_vendors.xml'] = generate_contacts_vendors_xml(processed_dfs['contacts'], None)
+                elif vendors_df_present:
+                    st.warning("Only Vendors data found. Attempting to generate vendors-only XML.")
+                    generated_xmls['tally_contacts_vendors.xml'] = generate_contacts_vendors_xml(None, processed_dfs['vendors'])
+                else:
+                    st.warning("Skipping Contacts/Vendors XML generation due to missing/errored Contacts and Vendors data.")
+            except Exception as e:
+                st.error("Error generating Contacts/Vendors XML:")
+                st.exception(e)
 
-            if 'invoices' in processed_dfs and processed_dfs['invoices'] is not None:
-                generated_xmls['tally_sales_vouchers.xml'] = generate_sales_vouchers_xml(processed_dfs['invoices'])
+
+            try:
+                if processed_dfs.get('invoices') is not None:
+                    generated_xmls['tally_sales_vouchers.xml'] = generate_sales_vouchers_xml(processed_dfs['invoices'])
+                else:
+                    st.warning("Skipping Sales Vouchers XML generation due to missing/errored Invoices data.")
+            except Exception as e:
+                st.error("Error generating Sales Vouchers XML:")
+                st.exception(e)
             
-            if 'bills' in processed_dfs and processed_dfs['bills'] is not None:
-                generated_xmls['tally_purchase_vouchers.xml'] = generate_purchase_vouchers_xml(processed_dfs['bills'])
+            try:
+                if processed_dfs.get('bills') is not None:
+                    generated_xmls['tally_purchase_vouchers.xml'] = generate_purchase_vouchers_xml(processed_dfs['bills'])
+                else:
+                    st.warning("Skipping Purchase Vouchers XML generation due to missing/errored Bills data.")
+            except Exception as e:
+                st.error("Error generating Purchase Vouchers XML:")
+                st.exception(e)
 
-            if 'customer_payments' in processed_dfs and processed_dfs['customer_payments'] is not None:
-                generated_xmls['tally_receipt_vouchers.xml'] = generate_customer_payments_xml(processed_dfs['customer_payments'])
+            try:
+                if processed_dfs.get('customer_payments') is not None:
+                    generated_xmls['tally_receipt_vouchers.xml'] = generate_customer_payments_xml(processed_dfs['customer_payments'])
+                else:
+                    st.warning("Skipping Receipt Vouchers XML generation due to missing/errored Customer Payments data.")
+            except Exception as e:
+                st.error("Error generating Customer Payments XML:")
+                st.exception(e)
 
-            if 'vendor_payments' in processed_dfs and processed_dfs['vendor_payments'] is not None:
-                generated_xmls['tally_payment_vouchers.xml'] = generate_vendor_payments_xml(processed_dfs['vendor_payments'])
+            try:
+                if processed_dfs.get('vendor_payments') is not None:
+                    generated_xmls['tally_payment_vouchers.xml'] = generate_vendor_payments_xml(processed_dfs['vendor_payments'])
+                else:
+                    st.warning("Skipping Payment Vouchers XML generation due to missing/errored Vendor Payments data.")
+            except Exception as e:
+                st.error("Error generating Vendor Payments XML:")
+                st.exception(e)
             
-            if 'credit_notes' in processed_dfs and processed_dfs['credit_notes'] is not None:
-                generated_xmls['tally_credit_notes.xml'] = generate_credit_notes_xml(processed_dfs['credit_notes'])
+            try:
+                if processed_dfs.get('credit_notes') is not None:
+                    generated_xmls['tally_credit_notes.xml'] = generate_credit_notes_xml(processed_dfs['credit_notes'])
+                else:
+                    st.warning("Skipping Credit Notes XML generation due to missing/errored Credit Notes data.")
+            except Exception as e:
+                st.error("Error generating Credit Notes XML:")
+                st.exception(e)
 
-            if 'journals' in processed_dfs and processed_dfs['journals'] is not None:
-                generated_xmls['tally_journal_vouchers.xml'] = generate_journal_vouchers_xml(processed_dfs['journals'])
+            try:
+                if processed_dfs.get('journals') is not None:
+                    generated_xmls['tally_journal_vouchers.xml'] = generate_journal_vouchers_xml(processed_dfs['journals'])
+                else:
+                    st.warning("Skipping Journal Vouchers XML generation due to missing/errored Journals data.")
+            except Exception as e:
+                st.error("Error generating Journal Vouchers XML:")
+                st.exception(e)
             
+            st.success("Tally XML generation attempts complete. Check for any errors above.")
 
             st.header("4. Download Generated XML Files")
             if generated_xmls:
@@ -1366,13 +1507,13 @@ if uploaded_file is not None:
                     )
                 st.info("Remember to import masters first, then vouchers, into your Tally ERP company.")
             else:
-                st.warning("No XML files were generated. Please check for errors in previous steps.")
+                st.warning("No XML files were generated. Please review the warnings/errors above.")
 
         except zipfile.BadZipFile:
             st.error("The uploaded file is not a valid ZIP file. Please upload a correctly formatted Zoho backup ZIP.")
         except Exception as e:
-            st.error(f"An unexpected error occurred during processing: {e}")
-            st.exception(e) # Show full traceback for debugging
+            st.error(f"An unexpected error occurred during the overall process: {e}")
+            st.exception(e) # Show full traceback for high-level errors
 
     st.markdown("---")
 
@@ -1502,7 +1643,7 @@ Tally generally requires a specific sequence for importing data to maintain data
 * **Behavior:** `Add New Vouchers`
 * **Verification:**
     * Check `Day Book`. Verify Bank/Cash ledger debit and Customer ledger credit.
-    * **Crucially, verify `Bill-wise Details` for 'Agst Ref' matching the invoice number(s) paid.**
+    * **Crucially, verify `Bill-wise Details` (Alt+B or specific button) for 'Agst Ref' matching the invoice number(s) paid.**
     * Check customer ledgers to ensure payments have reduced outstanding invoices.
 
 **d. Payment Vouchers (from Vendor Payments)**
@@ -1511,7 +1652,7 @@ Tally generally requires a specific sequence for importing data to maintain data
 * **Behavior:** `Add New Vouchers`
 * **Verification:**
     * Check `Day Book`. Verify Vendor ledger debit and Bank/Cash ledger credit.
-    * **Crucially, verify `Bill-wise Details` for 'Agst Ref' matching the bill number(s) paid.**
+    * **Crucially, verify `Bill-wise Details` (Alt+B or specific button) for 'Agst Ref' matching the bill number(s) paid.**
     * Check vendor ledgers to ensure payments have reduced outstanding bills.
 
 **e. Credit Note Vouchers**
@@ -1521,7 +1662,7 @@ Tally generally requires a specific sequence for importing data to maintain data
 * **Verification:**
     * Check `Day Book`. Verify Sales Returns (or similar) ledger debit and Customer ledger credit.
     * **Check for linking to Original Invoice Details for GST purposes.**
-    * Verify `Bill-wise Details` for 'Agst Ref' if the credit note was applied against a specific invoice.
+    * Verify `Bill-wise Details` (Alt+B or specific button) for 'Agst Ref' if the credit note was applied against a specific invoice.
 
 **f. Journal Vouchers**
 * **File:** `tally_journal_vouchers.xml`
