@@ -7,12 +7,11 @@ from datetime import datetime
 import io
 import tempfile
 import shutil
-import math # For math.isnan
+import math
+from xml.sax.saxutils import escape as xml_escape # NEW IMPORT
 
 # --- Configuration (Streamlit App) ---
-# This path is not directly used for file upload but defines expected internal structure
-# if manual placement was considered. For Streamlit, we use uploaded files directly.
-# ZOHO_ZIP_FILENAME = "Plant Essentials Private Limited_2025-07-09.zip" # Not directly used for upload
+# ... (rest of your configuration)
 
 # List of expected Zoho CSV files from the ZIP backup
 ZOHO_CSVS = [
@@ -39,10 +38,14 @@ DEFAULT_COUNTRY = "India" # Assuming default country for addresses
 # --- Helper Functions (Reused from previous scripts) ---
 
 def safe_str(value):
-    """Converts a value to string, handling NaN/None gracefully."""
+    """
+    Converts a value to string, handling NaN/None gracefully,
+    and escapes XML special characters.
+    """
     if pd.isna(value):
         return ""
-    return str(value).strip()
+    s_val = str(value).strip()
+    return xml_escape(s_val) # Apply XML escaping here
 
 def format_tally_date(date_str):
     """Converts 'YYYY-MM-DD' string to Tally's 'YYYYMMDD' format."""
@@ -568,13 +571,13 @@ def generate_ledgers_xml(df_coa):
 
         parent_group_for_new_group = "Primary" if group_name not in known_tally_primary_groups else ""
 
-        group_xml = etree.SubElement(tally_message, "GROUP", NAME=group_name, ACTION="CREATE")
-        etree.SubElement(group_xml, "NAME").text = group_name
+        group_xml = etree.SubElement(tally_message, "GROUP", NAME=safe_str(group_name), ACTION="CREATE") # Apply safe_str here
+        etree.SubElement(group_xml, "NAME").text = safe_str(group_name) # Apply safe_str here
         if parent_group_for_new_group:
             etree.SubElement(group_xml, "PARENT").text = parent_group_for_new_group
         etree.SubElement(group_xml, "ISADDABLE").text = "Yes"
         etree.SubElement(group_xml, "LANGUAGENAME.LIST").append(
-            etree.fromstring(f"<NAME.LIST><NAME>{group_name}</NAME></NAME.LIST>")
+            etree.fromstring(f"<NAME.LIST><NAME>{safe_str(group_name)}</NAME></NAME.LIST>") # Apply safe_str here
         )
 
     for index, row in df_coa.iterrows():
@@ -611,7 +614,7 @@ def generate_ledgers_xml(df_coa):
             etree.SubElement(ledger_xml, "DESCRIPTION").text = description
 
         etree.SubElement(ledger_xml, "LANGUAGENAME.LIST").append(
-            etree.fromstring(f"<NAME.LIST><NAME>{ledger_name}</NAME></NAME.LIST>")
+            etree.fromstring(f"<NAME.LIST><NAME>{ledger_name}</NAME></NAME.LIST>") # Apply safe_str here
         )
     xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
     st.success("Generated Ledgers XML.")
@@ -680,7 +683,7 @@ def generate_contacts_vendors_xml(df_contacts, df_vendors):
                     etree.SubElement(ledger_xml, "PLACEOFSUPPLY").text = place_of_supply_code.split('-')[0].strip()
 
             etree.SubElement(ledger_xml, "LANGUAGENAME.LIST").append(
-                etree.fromstring(f"<NAME.LIST><NAME>{party_name}</NAME></NAME.LIST>")
+                etree.fromstring(f"<NAME.LIST><NAME>{party_name}</NAME></NAME.LIST>") # Apply safe_str here
             )
 
     if df_vendors is not None:
@@ -725,8 +728,9 @@ def generate_contacts_vendors_xml(df_contacts, df_vendors):
                     etree.SubElement(bank_details, "IFSCCODE").text = ifsc_code
 
             etree.SubElement(ledger_xml, "LANGUAGENAME.LIST").append(
-                etree.fromstring(f"<NAME.LIST><NAME>{party_name}</NAME></NAME.LIST>")
+                etree.fromstring(f"<NAME.LIST><NAME>{party_name}</NAME></NAME.LIST>") # Apply safe_str here
             )
+
     xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
     st.success("Generated Contacts and Vendors XML.")
     return xml_string
@@ -1104,6 +1108,7 @@ def generate_journal_vouchers_xml(df_journals):
         etree.SubElement(voucher, "NARRATION").text = safe_str(header.get('Notes', 'Journal Entry'))
         etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(header['Journal Date'])
 
+
         all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
 
         current_debit_total = 0.0
@@ -1114,7 +1119,6 @@ def generate_journal_vouchers_xml(df_journals):
             debit_amount = entry_row.get('Debit', 0.0)
             credit_amount = entry_row.get('Credit', 0.0)
 
-            # Ensure amounts are numeric and not NaN
             if pd.isna(debit_amount): debit_amount = 0.0
             if pd.isna(credit_amount): credit_amount = 0.0
 
@@ -1248,111 +1252,105 @@ if uploaded_file is not None:
     st.success(f"File '{uploaded_file.name}' uploaded successfully.")
 
     # Create a temporary directory for extraction
+    # Using tempfile.TemporaryDirectory() as a context manager ensures cleanup
     with tempfile.TemporaryDirectory() as temp_dir:
         extract_path = os.path.join(temp_dir, "zoho_extracted")
         os.makedirs(extract_path)
 
-        # Write the uploaded file to the temporary path
+        # Write the uploaded file buffer to a temporary file
+        zip_temp_path = os.path.join(temp_dir, uploaded_file.name)
         try:
-            with open(os.path.join(temp_dir, uploaded_file.name), "wb") as f:
+            with open(zip_temp_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
-            zip_path = os.path.join(temp_dir, uploaded_file.name)
 
             # --- Extraction (Simplified 01_extract.py logic) ---
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            with zipfile.ZipFile(zip_temp_path, 'r') as zip_ref:
                 zip_ref.extractall(extract_path)
             st.info(f"Extracted Zoho ZIP to a temporary directory: {extract_path}")
 
-            # Verify extracted files
-            extracted_csv_paths = {}
+            # Verify extracted files and load them into a dictionary of DataFrames
+            raw_dfs = {}
             missing_files = []
             for zoho_csv_name in ZOHO_CSVS:
                 csv_path = os.path.join(extract_path, zoho_csv_name)
                 if os.path.exists(csv_path):
-                    extracted_csv_paths[zoho_csv_name] = csv_path
+                    try:
+                        raw_dfs[zoho_csv_name] = pd.read_csv(csv_path, encoding='utf-8', on_bad_lines='skip', low_memory=False)
+                        st.write(f"Loaded {zoho_csv_name} (raw).")
+                    except Exception as e:
+                        st.error(f"Error loading raw {zoho_csv_name}: {e}")
+                        missing_files.append(zoho_csv_name) # Treat loading error as missing
                 else:
                     missing_files.append(zoho_csv_name)
             
             if missing_files:
-                st.warning(f"⚠️ Warning: The following crucial Zoho CSV files were not found in the ZIP: {', '.join(missing_files)}.")
-                st.warning("Generated XMLs might be incomplete or inaccurate. Please ensure your Zoho backup contains these files.")
+                st.warning(f"⚠️ Warning: The following crucial Zoho CSV files were not found or could not be loaded from the ZIP: {', '.join(missing_files)}. Generated XMLs might be incomplete or inaccurate.")
             else:
-                st.success("✅ All expected Zoho CSV files found.")
+                st.success("✅ All expected Zoho CSV files found and loaded.")
 
             # --- Data Cleaning and Mapping (02_clean_map.py logic) ---
             st.header("2. Processing and Mapping Data")
             processed_dfs = {}
-            for key, filename in {
-                'chart_of_accounts': 'Chart_of_Accounts.csv',
-                'contacts': 'Contacts.csv',
-                'vendors': 'Vendors.csv',
-                'invoices': 'Invoice.csv',
-                'customer_payments': 'Customer_Payment.csv',
-                'vendor_payments': 'Vendor_Payment.csv',
-                'credit_notes': 'Credit_Note.csv',
-                'journals': 'Journal.csv',
-                'bills': 'Bill.csv',
-            }.items():
-                csv_file_path_in_zip = extracted_csv_paths.get(filename)
-                if csv_file_path_in_zip:
-                    try:
-                        # Load CSV directly from the extracted path
-                        df_raw = pd.read_csv(csv_file_path_in_zip, encoding='utf-8', on_bad_lines='skip', low_memory=False)
-                        
-                        # Call the appropriate processing function
-                        if key == 'chart_of_accounts':
-                            processed_dfs['coa'] = process_chart_of_accounts(df_raw)
-                        elif key == 'contacts':
-                            processed_dfs['contacts'] = process_contacts(df_raw)
-                        elif key == 'vendors':
-                            processed_dfs['vendors'] = process_vendors(df_raw)
-                        elif key == 'invoices':
-                            processed_dfs['invoices'] = process_invoices(df_raw)
-                        elif key == 'customer_payments':
-                            processed_dfs['customer_payments'] = process_customer_payments(df_raw)
-                        elif key == 'vendor_payments':
-                            processed_dfs['vendor_payments'] = process_vendor_payments(df_raw)
-                        elif key == 'credit_notes':
-                            processed_dfs['credit_notes'] = process_credit_notes(df_raw)
-                        elif key == 'journals':
-                            processed_dfs['journals'] = process_journals(df_raw)
-                        elif key == 'bills':
-                            processed_dfs['bills'] = process_bills(df_raw)
-                        st.write(f"Processed {filename}.")
-                    except Exception as e:
-                        st.error(f"Error processing {filename}: {e}")
-                else:
-                    st.warning(f"Skipping processing for {filename} as it was not found in the ZIP.")
+            
+            # Use .get() with a default of None to safely access raw_dfs
+            processed_dfs['coa'] = process_chart_of_accounts(raw_dfs.get('Chart_of_Accounts.csv'))
+            processed_dfs['contacts'] = process_contacts(raw_dfs.get('Contacts.csv'))
+            processed_dfs['vendors'] = process_vendors(raw_dfs.get('Vendors.csv'))
+            processed_dfs['invoices'] = process_invoices(raw_dfs.get('Invoice.csv'))
+            processed_dfs['customer_payments'] = process_customer_payments(raw_dfs.get('Customer_Payment.csv'))
+            processed_dfs['vendor_payments'] = process_vendor_payments(raw_dfs.get('Vendor_Payment.csv'))
+            processed_dfs['credit_notes'] = process_credit_notes(raw_dfs.get('Credit_Note.csv'))
+            processed_dfs['journals'] = process_journals(raw_dfs.get('Journal.csv'))
+            processed_dfs['bills'] = process_bills(raw_dfs.get('Bill.csv'))
+            
+            st.success("Data cleaning and mapping complete.")
 
             # --- Generate Tally XMLs (03_generate_tally_xml.py logic) ---
             st.header("3. Generate Tally XML Files")
             generated_xmls = {}
 
-            if 'coa' in processed_dfs and processed_dfs['coa'] is not None:
+            # Ensure all required DFs are present before generating
+            if processed_dfs.get('coa') is not None:
                 generated_xmls['tally_ledgers.xml'] = generate_ledgers_xml(processed_dfs['coa'])
+            else:
+                st.warning("Skipping Ledgers XML generation due to missing/errored Chart of Accounts data.")
             
-            if 'contacts' in processed_dfs and 'vendors' in processed_dfs and \
-               processed_dfs['contacts'] is not None and processed_dfs['vendors'] is not None:
+            if processed_dfs.get('contacts') is not None and processed_dfs.get('vendors') is not None:
                 generated_xmls['tally_contacts_vendors.xml'] = generate_contacts_vendors_xml(processed_dfs['contacts'], processed_dfs['vendors'])
+            else:
+                st.warning("Skipping Contacts/Vendors XML generation due to missing/errored Contacts or Vendors data.")
 
-            if 'invoices' in processed_dfs and processed_dfs['invoices'] is not None:
+            if processed_dfs.get('invoices') is not None:
                 generated_xmls['tally_sales_vouchers.xml'] = generate_sales_vouchers_xml(processed_dfs['invoices'])
+            else:
+                st.warning("Skipping Sales Vouchers XML generation due to missing/errored Invoices data.")
             
-            if 'bills' in processed_dfs and processed_dfs['bills'] is not None:
+            if processed_dfs.get('bills') is not None:
                 generated_xmls['tally_purchase_vouchers.xml'] = generate_purchase_vouchers_xml(processed_dfs['bills'])
+            else:
+                st.warning("Skipping Purchase Vouchers XML generation due to missing/errored Bills data.")
 
-            if 'customer_payments' in processed_dfs and processed_dfs['customer_payments'] is not None:
+            if processed_dfs.get('customer_payments') is not None:
                 generated_xmls['tally_receipt_vouchers.xml'] = generate_customer_payments_xml(processed_dfs['customer_payments'])
+            else:
+                st.warning("Skipping Receipt Vouchers XML generation due to missing/errored Customer Payments data.")
 
-            if 'vendor_payments' in processed_dfs and processed_dfs['vendor_payments'] is not None:
+            if processed_dfs.get('vendor_payments') is not None:
                 generated_xmls['tally_payment_vouchers.xml'] = generate_vendor_payments_xml(processed_dfs['vendor_payments'])
+            else:
+                st.warning("Skipping Payment Vouchers XML generation due to missing/errored Vendor Payments data.")
             
-            if 'credit_notes' in processed_dfs and processed_dfs['credit_notes'] is not None:
+            if processed_dfs.get('credit_notes') is not None:
                 generated_xmls['tally_credit_notes.xml'] = generate_credit_notes_xml(processed_dfs['credit_notes'])
+            else:
+                st.warning("Skipping Credit Notes XML generation due to missing/errored Credit Notes data.")
 
-            if 'journals' in processed_dfs and processed_dfs['journals'] is not None:
+            if processed_dfs.get('journals') is not None:
                 generated_xmls['tally_journal_vouchers.xml'] = generate_journal_vouchers_xml(processed_dfs['journals'])
+            else:
+                st.warning("Skipping Journal Vouchers XML generation due to missing/errored Journals data.")
             
+            st.success("Tally XML generation attempts complete.")
 
             st.header("4. Download Generated XML Files")
             if generated_xmls:
@@ -1366,7 +1364,7 @@ if uploaded_file is not None:
                     )
                 st.info("Remember to import masters first, then vouchers, into your Tally ERP company.")
             else:
-                st.warning("No XML files were generated. Please check for errors in previous steps.")
+                st.warning("No XML files were generated. Please review the warnings/errors above.")
 
         except zipfile.BadZipFile:
             st.error("The uploaded file is not a valid ZIP file. Please upload a correctly formatted Zoho backup ZIP.")
