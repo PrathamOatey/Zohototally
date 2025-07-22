@@ -8,6 +8,7 @@ import io
 import tempfile
 import shutil
 import math
+import re # Import regex module for string cleaning
 from xml.sax.saxutils import escape as xml_escape
 
 # --- Configuration (Streamlit App) ---
@@ -102,9 +103,42 @@ def format_date_column(df, column_name):
     return df
 
 def clean_numeric_column(df, column_name):
-    """Converts a column to numeric, filling NaNs with 0.0."""
+    """
+    Converts a column to numeric, handling common non-numeric characters
+    like currency symbols and commas, then fills NaNs with 0.0.
+    """
     if column_name in df.columns:
-        df[column_name] = pd.to_numeric(df[column_name], errors='coerce').fillna(0.0)
+        # Store original values for warning messages
+        original_col_series = df[column_name].copy()
+
+        # Convert to string first to apply regex safely
+        df[column_name] = df[column_name].astype(str)
+
+        # Regex to remove common currency symbols, commas, and trim whitespace
+        # This regex targets "INR ", "INR", "₹", "$" and commas
+        df[column_name] = df[column_name].apply(
+            lambda x: re.sub(r'INR\s*|INR|\$|₹|,', '', x).strip()
+        )
+
+        # Now convert to numeric, coercing any remaining errors to NaN
+        df[column_name] = pd.to_numeric(df[column_name], errors='coerce')
+
+        # Identify values that became NaN due to coercion (meaning they were non-numeric)
+        non_numeric_mask = df[column_name].isna()
+        initial_non_numeric_count = non_numeric_mask.sum()
+        
+        # Report if any significant non-numeric values were found and coerced
+        # Only report if original value wasn't already NaN/empty
+        if initial_non_numeric_count > 0:
+            sample_non_numeric = original_col_series[non_numeric_mask].dropna().unique()
+            if len(sample_non_numeric) > 0:
+                st.warning(f"  - Warning: Column '{column_name}' contained {initial_non_numeric_count} non-numeric entries (e.g., '{sample_non_numeric[0]}'). Coerced to 0.0.")
+            else:
+                # This case is for empty strings/whitespace that become NaN
+                st.warning(f"  - Warning: Column '{column_name}' contained {initial_non_numeric_count} empty/whitespace entries. Coerced to 0.0.")
+
+        # Fill any NaN (original or coerced) with 0.0
+        df[column_name] = df[column_name].fillna(0.0)
     return df
 
 def process_chart_of_accounts(df):
@@ -896,7 +930,10 @@ def generate_sales_vouchers_xml(df_invoices):
         
         all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
 
-        # Credit the Party Ledger (Customer)
+        # Flag to track if any item entries were added
+        has_item_entries = False
+
+        # Credit the Party Ledger (Customer) - Always added
         party_ledger_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
         etree.SubElement(party_ledger_entry, "LEDGERNAME").text = safe_str(header.get('Customer Name', ''))
         etree.SubElement(party_ledger_entry, "ISDEEMEDPOSITIVE").text = "No"
@@ -911,50 +948,68 @@ def generate_sales_vouchers_xml(df_invoices):
         # Process each line item
         for idx, item_row in group.iterrows():
             item_name = safe_str(item_row.get('Item Name'))
-            if not item_name and not safe_str(item_row.get('Item Desc')): # Check for actual item data
+            item_desc = safe_str(item_row.get('Item Desc'))
+            
+            # Skip if both item name and description are empty
+            if not item_name and not item_desc:
                 continue
 
             item_total = item_row.get('Item Total', 0.0)
             item_total = float(item_total) if not pd.isna(item_total) else 0.0 # Ensure float conversion
 
-            sales_ledger_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-            # This now refers to the mandatory 'Sales Account' created in generate_ledgers_xml
-            etree.SubElement(sales_ledger_entry, "LEDGERNAME").text = 'Sales Account' # Fixed to mandatory ledger name
-            etree.SubElement(sales_ledger_entry, "ISDEEMEDPOSITIVE").text = "Yes"
-            etree.SubElement(sales_ledger_entry, "AMOUNT").text = format_tally_amount(item_total)
+            # Only add ledger entry if item_total is not zero
+            if item_total != 0.0:
+                sales_ledger_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                etree.SubElement(sales_ledger_entry, "LEDGERNAME").text = 'Sales Account'
+                etree.SubElement(sales_ledger_entry, "ISDEEMEDPOSITIVE").text = "Yes"
+                etree.SubElement(sales_ledger_entry, "AMOUNT").text = format_tally_amount(item_total)
+                has_item_entries = True # Mark that an item entry was added
 
-            # Ensure GST amounts are floats before comparison
-            cgst_amount = float(item_row.get('CGST', 0.0)) if not pd.isna(item_row.get('CGST')) else 0.0
-            sgst_amount = float(item_row.get('SGST', 0.0)) if not pd.isna(item_row.get('SGST')) else 0.0
-            igst_amount = float(item_row.get('IGST', 0.0)) if not pd.isna(item_row.get('IGST')) else 0.0
+                # Ensure GST amounts are floats before comparison
+                cgst_amount = float(item_row.get('CGST', 0.0)) if not pd.isna(item_row.get('CGST')) else 0.0
+                sgst_amount = float(item_row.get('SGST', 0.0)) if not pd.isna(item_row.get('SGST')) else 0.0
+                igst_amount = float(item_row.get('IGST', 0.0)) if not pd.isna(item_row.get('IGST')) else 0.0
 
-            if igst_amount > 0: # Now comparison with float is safe
-                gst_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-                etree.SubElement(gst_entry, "LEDGERNAME").text = 'Output IGST' # Fixed to mandatory ledger name
-                etree.SubElement(gst_entry, "ISDEEMEDPOSITIVE").text = "Yes"
-                etree.SubElement(gst_entry, "AMOUNT").text = format_tally_amount(igst_amount)
-            
-            if cgst_amount > 0: # Now comparison with float is safe
-                gst_entry_cgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-                etree.SubElement(gst_entry_cgst, "LEDGERNAME").text = 'Output CGST' # Fixed to mandatory ledger name
-                etree.SubElement(gst_entry_cgst, "ISDEEMEDPOSITIVE").text = "Yes"
-                etree.SubElement(gst_entry_cgst, "AMOUNT").text = format_tally_amount(cgst_amount)
-            
-            if sgst_amount > 0: # Now comparison with float is safe
-                gst_entry_sgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-                etree.SubElement(gst_entry_sgst, "LEDGERNAME").text = 'Output SGST' # Fixed to mandatory ledger name
-                etree.SubElement(gst_entry_sgst, "ISDEEMEDPOSITIVE").text = "Yes"
-                etree.SubElement(gst_entry_sgst, "AMOUNT").text = format_tally_amount(sgst_amount)
+                if igst_amount > 0:
+                    gst_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                    etree.SubElement(gst_entry, "LEDGERNAME").text = 'Output IGST'
+                    etree.SubElement(gst_entry, "ISDEEMEDPOSITIVE").text = "Yes"
+                    etree.SubElement(gst_entry, "AMOUNT").text = format_tally_amount(igst_amount)
+                
+                if cgst_amount > 0:
+                    gst_entry_cgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                    etree.SubElement(gst_entry_cgst, "LEDGERNAME").text = 'Output CGST'
+                    etree.SubElement(gst_entry_cgst, "ISDEEMEDPOSITIVE").text = "Yes"
+                    etree.SubElement(gst_entry_cgst, "AMOUNT").text = format_tally_amount(cgst_amount)
+                
+                if sgst_amount > 0:
+                    gst_entry_sgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                    etree.SubElement(gst_entry_sgst, "LEDGERNAME").text = 'Output SGST'
+                    etree.SubElement(gst_entry_sgst, "ISDEEMEDPOSITIVE").text = "Yes"
+                    etree.SubElement(gst_entry_sgst, "AMOUNT").text = format_tally_amount(sgst_amount)
 
         round_off_amount = header.get('Round Off', 0.0)
-        # Ensure round_off_amount is float before math.isnan
         round_off_amount = float(round_off_amount) if not pd.isna(round_off_amount) else 0.0
         
         if round_off_amount != 0.0:
             round_off_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-            etree.SubElement(round_off_entry, "LEDGERNAME").text = 'Round Off' # Fixed to mandatory ledger name
+            etree.SubElement(round_off_entry, "LEDGERNAME").text = 'Round Off'
             etree.SubElement(round_off_entry, "ISDEEMEDPOSITIVE").text = "Yes" if round_off_amount > 0 else "No"
             etree.SubElement(round_off_entry, "AMOUNT").text = format_tally_amount(round_off_amount)
+            has_item_entries = True # Round off also counts as an entry for voucher validity
+
+        # --- SAFEGURAD AGAINST "No Entries in Voucher!" ERROR ---
+        # If no item-related ledger entries were added (meaning no valid items/amounts),
+        # add a single sales account entry for the total amount to prevent Tally error.
+        if not has_item_entries and total_amount != 0.0:
+            st.warning(f"Voucher ID: {invoice_id} ({header.get('Invoice Number', '')}) has no valid line items. Adding a generic 'Sales Account' entry for the total amount to avoid 'No Entries in Voucher!' error.")
+            generic_sales_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+            etree.SubElement(generic_sales_entry, "LEDGERNAME").text = 'Sales Account'
+            etree.SubElement(generic_sales_entry, "ISDEEMEDPOSITIVE").text = "Yes"
+            etree.SubElement(generic_sales_entry, "AMOUNT").text = format_tally_amount(total_amount)
+        elif not has_item_entries and total_amount == 0.0:
+             st.warning(f"Voucher ID: {invoice_id} ({header.get('Invoice Number', '')}) has no valid line items and a total amount of 0.0. This voucher will likely be skipped by Tally or result in an empty voucher if imported.")
+
 
     xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
     st.success("Generated Sales Vouchers XML.")
@@ -991,6 +1046,7 @@ def generate_customer_payments_xml(df_payments):
 
         all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
 
+        # Debit Bank/Cash Account
         debit_bank_cash = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
         # This now refers to the mandatory 'Cash-in-Hand' or the actual bank name if present and created
         etree.SubElement(debit_bank_cash, "LEDGERNAME").text = safe_str(row.get('Tally_Deposit_Ledger', 'Cash-in-Hand'))
@@ -1055,7 +1111,7 @@ def generate_vendor_payments_xml(df_payments):
 
         bill_number = safe_str(row.get('Bill Number'))
         bill_amount_applied = row.get('Bill Amount', 0.0)
-        if pd.isna(bill_amount_applied): amount_applied = 0.0
+        if pd.isna(bill_amount_applied): bill_amount_applied = 0.0
 
         if bill_number and bill_amount_applied != 0:
             bill_allocation = etree.SubElement(debit_vendor, "BILLALLOCATIONS.LIST")
@@ -1135,42 +1191,51 @@ def generate_credit_notes_xml(df_credit_notes):
 
         all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
 
+        # Flag to track if any item entries were added
+        has_item_entries = False
+
         for idx, item_row in group.iterrows():
             item_name = safe_str(item_row.get('Item Name'))
-            if not item_name and not safe_str(item_row.get('Item Desc')):
+            item_desc = safe_str(item_row.get('Item Desc'))
+            
+            # Skip if both item name and description are empty
+            if not item_name and not item_desc:
                 continue
 
             item_total = item_row.get('Item Total', 0.0)
             item_total = float(item_total) if not pd.isna(item_total) else 0.0
 
-            debit_sales_return = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-            # This now refers to the mandatory 'Sales Returns' created in generate_ledgers_xml
-            etree.SubElement(debit_sales_return, "LEDGERNAME").text = 'Sales Returns' # Fixed to mandatory ledger name
-            etree.SubElement(debit_sales_return, "ISDEEMEDPOSITIVE").text = "Yes"
-            etree.SubElement(debit_sales_return, "AMOUNT").text = format_tally_amount(item_total)
+            # Only add ledger entry if item_total is not zero
+            if item_total != 0.0:
+                debit_sales_return = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                etree.SubElement(debit_sales_return, "LEDGERNAME").text = 'Sales Returns'
+                etree.SubElement(debit_sales_return, "ISDEEMEDPOSITIVE").text = "Yes"
+                etree.SubElement(debit_sales_return, "AMOUNT").text = format_tally_amount(item_total)
+                has_item_entries = True
 
-            cgst_amount = float(item_row.get('CGST', 0.0)) if not pd.isna(item_row.get('CGST')) else 0.0
-            sgst_amount = float(item_row.get('SGST', 0.0)) if not pd.isna(item_row.get('SGST')) else 0.0
-            igst_amount = float(item_row.get('IGST', 0.0)) if not pd.isna(item_row.get('IGST')) else 0.0
+                cgst_amount = float(item_row.get('CGST', 0.0)) if not pd.isna(item_row.get('CGST')) else 0.0
+                sgst_amount = float(item_row.get('SGST', 0.0)) if not pd.isna(item_row.get('SGST')) else 0.0
+                igst_amount = float(item_row.get('IGST', 0.0)) if not pd.isna(item_row.get('IGST')) else 0.0
 
-            if igst_amount > 0:
-                gst_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-                etree.SubElement(gst_entry, "LEDGERNAME").text = 'Output IGST' # Fixed to mandatory ledger name
-                etree.SubElement(gst_entry, "ISDEEMEDPOSITIVE").text = "No"
-                etree.SubElement(gst_entry, "AMOUNT").text = format_tally_amount(-igst_amount)
-            
-            if cgst_amount > 0:
-                gst_entry_cgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-                etree.SubElement(gst_entry_cgst, "LEDGERNAME").text = 'Output CGST' # Fixed to mandatory ledger name
-                etree.SubElement(gst_entry_cgst, "ISDEEMEDPOSITIVE").text = "No"
-                etree.SubElement(gst_entry_cgst, "AMOUNT").text = format_tally_amount(-cgst_amount)
-            
-            if sgst_amount > 0:
-                gst_entry_sgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-                etree.SubElement(gst_entry_sgst, "LEDGERNAME").text = 'Output SGST' # Fixed to mandatory ledger name
-                etree.SubElement(gst_entry_sgst, "ISDEEMEDPOSITIVE").text = "No"
-                etree.SubElement(gst_entry_sgst, "AMOUNT").text = format_tally_amount(-sgst_amount)
+                if igst_amount > 0:
+                    gst_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                    etree.SubElement(gst_entry, "LEDGERNAME").text = 'Output IGST'
+                    etree.SubElement(gst_entry, "ISDEEMEDPOSITIVE").text = "No"
+                    etree.SubElement(gst_entry, "AMOUNT").text = format_tally_amount(-igst_amount)
+                
+                if cgst_amount > 0:
+                    gst_entry_cgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                    etree.SubElement(gst_entry_cgst, "LEDGERNAME").text = 'Output CGST'
+                    etree.SubElement(gst_entry_cgst, "ISDEEMEDPOSITIVE").text = "No"
+                    etree.SubElement(gst_entry_cgst, "AMOUNT").text = format_tally_amount(-cgst_amount)
+                
+                if sgst_amount > 0:
+                    gst_entry_sgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                    etree.SubElement(gst_entry_sgst, "LEDGERNAME").text = 'Output SGST'
+                    etree.SubElement(gst_entry_sgst, "ISDEEMEDPOSITIVE").text = "No"
+                    etree.SubElement(gst_entry_sgst, "AMOUNT").text = format_tally_amount(-sgst_amount)
         
+        # Credit Customer Ledger - Always added regardless of item entries
         credit_customer = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
         etree.SubElement(credit_customer, "LEDGERNAME").text = safe_str(header.get('Customer Name', ''))
         etree.SubElement(credit_customer, "ISDEEMEDPOSITIVE").text = "No"
@@ -1183,6 +1248,19 @@ def generate_credit_notes_xml(df_credit_notes):
             etree.SubElement(bill_details, "NAME").text = associated_invoice_number
             etree.SubElement(bill_details, "BILLTYPE").text = "Agst Ref"
             etree.SubElement(bill_details, "AMOUNT").text = format_tally_amount(-total_amount)
+
+        # --- SAFEGURAD AGAINST "No Entries in Voucher!" ERROR for Credit Notes ---
+        # If no item-related entries AND total_amount is not zero (meaning there should have been an entry)
+        # add a generic 'Sales Returns' entry to ensure the voucher is not empty.
+        if not has_item_entries and total_amount != 0.0:
+            st.warning(f"Credit Note ID: {credit_note_id} ({header.get('Credit Note Number', '')}) has no valid line items. Adding a generic 'Sales Returns' entry for the total amount to avoid 'No Entries in Voucher!' error.")
+            generic_sales_return_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+            etree.SubElement(generic_sales_return_entry, "LEDGERNAME").text = 'Sales Returns'
+            etree.SubElement(generic_sales_return_entry, "ISDEEMEDPOSITIVE").text = "Yes" # Debit for sales return
+            etree.SubElement(generic_sales_return_entry, "AMOUNT").text = format_tally_amount(total_amount)
+        elif not has_item_entries and total_amount == 0.0:
+             st.info(f"Credit Note ID: {credit_note_id} ({header.get('Credit Note Number', '')}) has no valid line items and a total amount of 0.0. This voucher will likely be skipped by Tally if it has no entries.")
+
 
     xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
     st.success("Generated Credit Notes XML.")
@@ -1216,6 +1294,7 @@ def generate_journal_vouchers_xml(df_journals):
 
         current_debit_total = 0.0
         current_credit_total = 0.0
+        has_entries = False # Flag to check if any ledger entries are added
 
         for idx, entry_row in group.iterrows():
             ledger_name = safe_str(entry_row.get('Account', ''))
@@ -1225,21 +1304,29 @@ def generate_journal_vouchers_xml(df_journals):
             if pd.isna(debit_amount): debit_amount = 0.0
             if pd.isna(credit_amount): credit_amount = 0.0
 
+            # Only add entry if there's a non-zero amount
             if debit_amount > 0:
                 ledger_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
                 etree.SubElement(ledger_entry, "LEDGERNAME").text = ledger_name
                 etree.SubElement(ledger_entry, "ISDEEMEDPOSITIVE").text = "Yes"
                 etree.SubElement(ledger_entry, "AMOUNT").text = format_tally_amount(debit_amount)
                 current_debit_total += debit_amount
+                has_entries = True
             elif credit_amount > 0:
                 ledger_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
                 etree.SubElement(ledger_entry, "LEDGERNAME").text = ledger_name
                 etree.SubElement(ledger_entry, "ISDEEMEDPOSITIVE").text = "No"
                 etree.SubElement(ledger_entry, "AMOUNT").text = format_tally_amount(-credit_amount)
                 current_credit_total += credit_amount
+                has_entries = True
         
         if abs(current_debit_total - current_credit_total) > 0.01:
             st.warning(f"Journal '{journal_num}' has an imbalanced debit/credit. Debit: {current_debit_total:.2f}, Credit: {current_credit_total:.2f}. Tally might reject this voucher.")
+        
+        # --- SAFEGURAD AGAINST "No Entries in Voucher!" ERROR for Journals ---
+        if not has_entries:
+            st.warning(f"Journal ID: {journal_num} ({header.get('Journal Number', '')}) has no valid ledger entries after processing. This voucher will likely be skipped by Tally if it has no entries.")
+
 
     xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
     st.success("Generated Journal Vouchers XML.")
@@ -1284,6 +1371,9 @@ def generate_purchase_vouchers_xml(df_bills):
         
         all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
 
+        # Flag to track if any item entries were added
+        has_item_entries = False
+
         credit_party = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
         etree.SubElement(credit_party, "LEDGERNAME").text = safe_str(header.get('Vendor Name', ''))
         etree.SubElement(credit_party, "ISDEEMEDPOSITIVE").text = "No"
@@ -1297,49 +1387,63 @@ def generate_purchase_vouchers_xml(df_bills):
 
         for idx, item_row in group.iterrows():
             item_name = safe_str(item_row.get('Item Name'))
-            if not item_name and not safe_str(item_row.get('Description')):
+            item_desc = safe_str(item_row.get('Description')) # For Bills, description is more common
+            if not item_name and not item_desc:
                 continue
             
             item_total = item_row.get('Item Total', 0.0)
             item_total = float(item_total) if not pd.isna(item_total) else 0.0
 
-            debit_purchase = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-            # This now refers to the mandatory 'Purchase Account' created in generate_ledgers_xml
-            etree.SubElement(debit_purchase, "LEDGERNAME").text = 'Purchase Account' # Fixed to mandatory ledger name
-            etree.SubElement(debit_purchase, "ISDEEMEDPOSITIVE").text = "Yes"
-            etree.SubElement(debit_purchase, "AMOUNT").text = format_tally_amount(item_total)
+            if item_total != 0.0:
+                debit_purchase = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                etree.SubElement(debit_purchase, "LEDGERNAME").text = 'Purchase Account'
+                etree.SubElement(debit_purchase, "ISDEEMEDPOSITIVE").text = "Yes"
+                etree.SubElement(debit_purchase, "AMOUNT").text = format_tally_amount(item_total)
+                has_item_entries = True
 
-            cgst_amount = float(item_row.get('CGST', 0.0)) if not pd.isna(item_row.get('CGST')) else 0.0
-            sgst_amount = float(item_row.get('SGST', 0.0)) if not pd.isna(item_row.get('SGST')) else 0.0
-            igst_amount = float(item_row.get('IGST', 0.0)) if not pd.isna(item_row.get('IGST')) else 0.0
+                cgst_amount = float(item_row.get('CGST', 0.0)) if not pd.isna(item_row.get('CGST')) else 0.0
+                sgst_amount = float(item_row.get('SGST', 0.0)) if not pd.isna(item_row.get('SGST')) else 0.0
+                igst_amount = float(item_row.get('IGST', 0.0)) if not pd.isna(item_row.get('IGST')) else 0.0
 
-            if igst_amount > 0:
-                gst_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-                etree.SubElement(gst_entry, "LEDGERNAME").text = 'Input IGST' # Fixed to mandatory ledger name
-                etree.SubElement(gst_entry, "ISDEEMEDPOSITIVE").text = "Yes"
-                etree.SubElement(gst_entry, "AMOUNT").text = format_tally_amount(igst_amount)
-            
-            if cgst_amount > 0:
-                gst_entry_cgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-                etree.SubElement(gst_entry_cgst, "LEDGERNAME").text = 'Input CGST' # Fixed to mandatory ledger name
-                etree.SubElement(gst_entry_cgst, "ISDEEMEDPOSITIVE").text = "Yes"
-                etree.SubElement(gst_entry_cgst, "AMOUNT").text = format_tally_amount(cgst_amount)
-            
-            if sgst_amount > 0:
-                gst_entry_sgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-                etree.SubElement(gst_entry_sgst, "LEDGERNAME").text = 'Input SGST' # Fixed to mandatory ledger name
-                etree.SubElement(gst_entry_sgst, "ISDEEMEDPOSITIVE").text = "Yes"
-                etree.SubElement(gst_entry_sgst, "AMOUNT").text = format_tally_amount(sgst_amount)
+                if igst_amount > 0:
+                    gst_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                    etree.SubElement(gst_entry, "LEDGERNAME").text = 'Input IGST'
+                    etree.SubElement(gst_entry, "ISDEEMEDPOSITIVE").text = "Yes"
+                    etree.SubElement(gst_entry, "AMOUNT").text = format_tally_amount(igst_amount)
+                
+                if cgst_amount > 0:
+                    gst_entry_cgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                    etree.SubElement(gst_entry_cgst, "LEDGERNAME").text = 'Input CGST'
+                    etree.SubElement(gst_entry_cgst, "ISDEEMEDPOSITIVE").text = "Yes"
+                    etree.SubElement(gst_entry_cgst, "AMOUNT").text = format_tally_amount(cgst_amount)
+                
+                if sgst_amount > 0:
+                    gst_entry_sgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                    etree.SubElement(gst_entry_sgst, "LEDGERNAME").text = 'Input SGST'
+                    etree.SubElement(gst_entry_sgst, "ISDEEMEDPOSITIVE").text = "Yes"
+                    etree.SubElement(gst_entry_sgst, "AMOUNT").text = format_tally_amount(sgst_amount)
 
         adjustment_amount = header.get('Adjustment', 0.0)
-        # Ensure adjustment_amount is float before math.isnan
         adjustment_amount = float(adjustment_amount) if not pd.isna(adjustment_amount) else 0.0
         
         if adjustment_amount != 0.0:
             round_off_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-            etree.SubElement(round_off_entry, "LEDGERNAME").text = 'Round Off' # Fixed to mandatory ledger name
+            etree.SubElement(round_off_entry, "LEDGERNAME").text = 'Round Off'
             etree.SubElement(round_off_entry, "ISDEEMEDPOSITIVE").text = "Yes" if adjustment_amount > 0 else "No"
             etree.SubElement(round_off_entry, "AMOUNT").text = format_tally_amount(adjustment_amount)
+            has_item_entries = True # Round off also counts as an entry for voucher validity
+
+        # --- SAFEGURAD AGAINST "No Entries in Voucher!" ERROR ---
+        # If no item-related ledger entries were added (meaning no valid items/amounts),
+        # add a single purchase account entry for the total amount to prevent Tally error.
+        if not has_item_entries and total_amount != 0.0:
+            st.warning(f"Voucher ID: {bill_id} ({header.get('Bill Number', '')}) has no valid line items. Adding a generic 'Purchase Account' entry for the total amount to avoid 'No Entries in Voucher!' error.")
+            generic_purchase_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+            etree.SubElement(generic_purchase_entry, "LEDGERNAME").text = 'Purchase Account'
+            etree.SubElement(generic_purchase_entry, "ISDEEMEDPOSITIVE").text = "Yes"
+            etree.SubElement(generic_purchase_entry, "AMOUNT").text = format_tally_amount(total_amount)
+        elif not has_item_entries and total_amount == 0.0:
+             st.info(f"Voucher ID: {bill_id} ({header.get('Bill Number', '')}) has no valid line items and a total amount of 0.0. This voucher will likely be skipped by Tally if it has no entries.")
 
     xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
     st.success("Generated Purchase Vouchers XML.")
@@ -1653,111 +1757,4 @@ Tally generally requires a specific sequence for importing data to maintain data
 ### 1. Import Master Data
 
 **a. Ledgers and Groups**
-* **File:** `tally_ledgers.xml`
-* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Masters`
-* **Behavior:** `Combine Opening Balances` (or `Add New Masters`)
-* **Verification:** After import, navigate to `Gateway of Tally` > `Display More Reports` > `List of Accounts`. Check under various groups (e.g., 'Indirect Expenses', 'Bank Accounts', 'Sales Accounts', 'Purchase Accounts', 'Duties & Taxes') to ensure all your Zoho Chart of Accounts entries, plus the newly added mandatory ledgers, have been created as Ledgers in Tally with their correct parent groups.
-
-**b. Contacts (Sundry Debtors) and Vendors (Sundry Creditors)**
-* **File:** `tally_contacts_vendors.xml`
-* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Masters`
-* **Behavior:** `Combine Opening Balances` (or `Add New Masters`)
-* **Verification:** Check `Gateway of Tally` > `Display More Reports` > `List of Accounts` under `Sundry Debtors` and `Sundry Creditors`. Select a few parties and drill down (`Alt+L`) to verify their addresses, GSTINs, contact details, and opening balances.
-
-### 2. Import Financial Vouchers
-
-**a. Sales Vouchers (from Invoices)**
-* **File:** `tally_sales_vouchers.xml`
-* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
-* **Behavior:** `Add New Vouchers`
-* **Verification:**
-    * Check `Gateway of Tally` > `Display More Reports` > `Day Book`. Review a sample of imported Sales Vouchers.
-    * Drill down into a few vouchers to verify: Party Name and details, Date and Voucher Number, Sales Ledger, amounts, and GST application (CGST/SGST/IGST), Narration.
-    * **Crucially, check `Bill-wise Details` (Alt+B or specific button) for 'New Ref' against the invoice number.**
-    * Check individual Customer Ledger accounts (`Display More Reports` > `Account Books` > `Ledger` > Select Customer) to ensure balances are correct and bill-wise details reflect the new invoices.
-
-**b. Purchase Vouchers (from Bills)**
-* **File:** `tally_purchase_vouchers.xml`
-* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
-* **Behavior:** `Add New Vouchers`
-* **Verification:**
-    * Check `Gateway of Tally` > `Display More Reports` > `Day Book`. Review a sample of imported Purchase Vouchers.
-    * Verify Party Name, Date, Voucher Number, Purchase Ledger, amounts, GST, and **`Bill-wise Details` for 'New Ref' against the bill number.**
-    * Check individual Vendor Ledger accounts for correct balances and bill-wise details.
-
-**c. Receipt Vouchers (from Customer Payments)**
-* **File:** `tally_receipt_vouchers.xml`
-* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
-* **Behavior:** `Add New Vouchers`
-* **Verification:**
-    * Check `Day Book`. Verify Bank/Cash ledger debit and Customer ledger credit.
-    * **Crucially, verify `Bill-wise Details` (Alt+B or specific button) for 'Agst Ref' matching the invoice number(s) paid.**
-    * Check customer ledgers to ensure payments have reduced outstanding invoices.
-
-**d. Payment Vouchers (from Vendor Payments)**
-* **File:** `tally_payment_vouchers.xml`
-* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
-* **Behavior:** `Add New Vouchers`
-* **Verification:**
-    * Check `Day Book`. Verify Vendor ledger debit and Bank/Cash ledger credit.
-    * **Crucially, verify `Bill-wise Details` (Alt+B or specific button) for 'Agst Ref' matching the bill number(s) paid.**
-    * Check vendor ledgers to ensure payments have reduced outstanding bills.
-
-**e. Credit Note Vouchers**
-* **File:** `tally_credit_notes.xml`
-* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
-* **Behavior:** `Add New Vouchers`
-* **Verification:**
-    * Check `Day Book`. Verify Sales Returns (or similar) ledger debit and Customer ledger credit.
-    * **Check for linking to Original Invoice Details for GST purposes.**
-    * Verify `Bill-wise Details` (Alt+B or specific button) for 'Agst Ref' if the credit note was applied against a specific invoice.
-
-**f. Journal Vouchers**
-* **File:** `tally_journal_vouchers.xml`
-* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
-* **Behavior:** `Add New Vouchers`
-* **Verification:**
-    * Check `Day Book`. Drill down into a few journal vouchers to ensure the debit and credit legs for each entry are correct and balanced.
-    * Check affected ledger accounts to see if the journal entries have the intended impact on balances.
-
----
-
-## Troubleshooting Common Import Errors
-
-When Tally throws an error during import, it often means:
-
-1.  **"Ledger Not Found"**:
-    * **Cause:** A ledger name specified in the XML (e.g., a customer, vendor, income, expense, or tax ledger) does not exist in your Tally company with the exact name.
-    * **Solution:** The updated script attempts to create common ledgers. If this error still occurs, it means a specific ledger used in a transaction (particularly from `Journal.csv`'s 'Account' column) is not one of the mandatory ones and also not in your Zoho `Chart_of_Accounts.csv`. You **must manually create that ledger in Tally** with the exact name.
-
-2.  **"Invalid Date Format"**:
-    * **Cause:** The date format in the XML is not `YYYYMMDD`.
-    * **Solution:** The Python script aims to format dates correctly. If this error occurs, investigate the original Zoho date format in your source CSVs.
-
-3.  **"Error in XML Structure" / "Invalid XML Tag"**:
-    * **Cause:** The XML generated has a syntax error, incorrect tag names, or improper nesting according to Tally's schema.
-    * **Solution:** This is rare if the script runs without errors, but if it happens, there might be a subtle bug or an edge case in your data.
-
-4.  **"Amount Mismatch" / "Debit-Credit Imbalance"**:
-    * **Cause:** For a voucher (e.g., Sales, Purchase, Journal), the total debits do not equal total credits. This is a fundamental accounting principle.
-    * **Solution:** Review your data in the original Zoho CSVs and how totals are calculated (e.g., `Item Total`, `SubTotal`, `Total`, `Adjustment`, taxes). The script includes warnings for imbalanced journals.
-
-5.  **GST Related Errors**:
-    * **Cause:** Incorrect GSTIN, wrong GST registration type, mismatch between state code and GSTIN, or incorrect tax ledgers being used for intra/inter-state transactions.
-    * **Solution:** Verify the `GSTIN` and `GST Treatment` fields for your customers/vendors and invoices/bills. Confirm the mapping of `Place of Supply(With State Code)` in the script. Ensure your 'Output CGST', 'Output SGST', 'Output IGST', 'Input CGST', 'Input SGST', 'Input IGST' ledgers exist in Tally and are configured correctly as 'Duties & Taxes' with the appropriate GST types and percentages.
-
----
-
-## Final Post-Import Verification
-
-After successfully importing all XML files into your **test Tally company**:
-
-* **Trial Balance:** Compare the Trial Balance generated in Tally with your Zoho's Trial Balance report as of the migration cut-off date.
-* **Balance Sheet & Profit & Loss:** Review these financial statements for accuracy and consistency with Zoho.
-* **Account Books:** Drill down into key ledger accounts (e.g., your Bank accounts, Cash, Sundry Debtors, Sundry Creditors) and cross-verify their balances and transactions with Zoho.
-* **Outstanding Receivables/Payables:** Verify that the 'Bills Receivable' and 'Bills Payable' reports in Tally match the outstanding amounts in Zoho.
-* **GST Reports (if applicable):** Generate GSTR-1 and GSTR-2 (or relevant GST reports) in Tally and compare them with your Zoho GST reports for the migrated period.
-* **Sample Vouchers:** Randomly open 5-10 vouchers of each type (Sales, Purchase, Receipt, Payment, Journal, Credit Note) and compare every detail (date, amount, ledger allocation, narration, bill-wise details) against the original Zoho data.
-
-Once you are confident in the accuracy of the imported data in your test company, you can proceed to import into your live Tally company (after taking a fresh backup!).
-""")
+* **File:** `tally_ledgers.xml
