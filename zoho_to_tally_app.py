@@ -1227,4 +1227,539 @@ def generate_journal_vouchers_xml(df_journals):
             if pd.isna(credit_amount): credit_amount = 0.0
 
             if debit_amount > 0:
-                ledger_entry = etree.SubElement(all_
+                ledger_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                etree.SubElement(ledger_entry, "LEDGERNAME").text = ledger_name
+                etree.SubElement(ledger_entry, "ISDEEMEDPOSITIVE").text = "Yes"
+                etree.SubElement(ledger_entry, "AMOUNT").text = format_tally_amount(debit_amount)
+                current_debit_total += debit_amount
+            elif credit_amount > 0:
+                ledger_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                etree.SubElement(ledger_entry, "LEDGERNAME").text = ledger_name
+                etree.SubElement(ledger_entry, "ISDEEMEDPOSITIVE").text = "No"
+                etree.SubElement(ledger_entry, "AMOUNT").text = format_tally_amount(-credit_amount)
+                current_credit_total += credit_amount
+        
+        if abs(current_debit_total - current_credit_total) > 0.01:
+            st.warning(f"Journal '{journal_num}' has an imbalanced debit/credit. Debit: {current_debit_total:.2f}, Credit: {current_credit_total:.2f}. Tally might reject this voucher.")
+
+    xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
+    st.success("Generated Journal Vouchers XML.")
+    return xml_string
+
+
+def generate_purchase_vouchers_xml(df_bills):
+    st.info("Generating Purchase Vouchers XML...")
+    if df_bills is None: return None
+
+    envelope, tally_message = create_tally_envelope("Vouchers", "VOUCHERS")
+    df_bills['Total'] = pd.to_numeric(df_bills['Total'], errors='coerce').fillna(0)
+    grouped_bills = df_bills.groupby('Bill ID')
+
+    for bill_id, group in grouped_bills:
+        header = group.iloc[0]
+
+        total_amount = header.get('Total', 0.0)
+        if pd.isna(total_amount): total_amount = 0.0
+
+        voucher = etree.SubElement(tally_message, "VOUCHER",
+                                   REMOTEID=safe_str(header.get('Bill ID', '')),
+                                   VCHTYPE="Purchase",
+                                   ACTION="CREATE")
+
+        etree.SubElement(voucher, "DATE").text = format_tally_date(header.get('Bill Date', ''))
+        etree.SubElement(voucher, "GUID").text = f"PUR-{safe_str(header.get('Bill ID', ''))}"
+        etree.SubElement(voucher, "VOUCHERTYPENAME").text = "Purchase"
+        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(header.get('Bill Number', ''))
+        etree.SubElement(voucher, "PARTYLEDGERNAME").text = safe_str(header.get('Vendor Name', ''))
+        etree.SubElement(voucher, "BASICSELLERNAME").text = safe_str(header.get('Vendor Name', ''))
+        etree.SubElement(voucher, "PERSISTEDVIEW").text = "Accounting Voucher"
+        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(header.get('Bill Date', ''))
+        etree.SubElement(voucher, "NARRATION").text = safe_str(header.get('Vendor Notes', ''))
+        
+        seller_details = etree.SubElement(voucher, "SELLERDETAILS.LIST")
+        etree.SubElement(seller_details, "CONSNAME").text = safe_str(header.get('Vendor Name', ''))
+        gstin = safe_str(header.get('GST Identification Number (GSTIN)'))
+        if gstin:
+            etree.SubElement(seller_details, "GSTREGISTRATIONTYPE").text = safe_str(header.get('GST Treatment', 'Regular'))
+            etree.SubElement(seller_details, "GSTIN").text = gstin
+        
+        all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
+
+        credit_party = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+        etree.SubElement(credit_party, "LEDGERNAME").text = safe_str(header.get('Vendor Name', ''))
+        etree.SubElement(credit_party, "ISDEEMEDPOSITIVE").text = "No"
+        etree.SubElement(credit_party, "AMOUNT").text = format_tally_amount(-total_amount)
+        
+        bill_allocation_list = etree.SubElement(credit_party, "BILLALLOCATIONS.LIST")
+        bill_allocation = etree.SubElement(bill_allocation_list, "BILLALLOCATIONS")
+        etree.SubElement(bill_allocation, "NAME").text = safe_str(header.get('Bill Number', ''))
+        etree.SubElement(bill_allocation, "BILLTYPE").text = "New Ref"
+        etree.SubElement(bill_allocation, "AMOUNT").text = format_tally_amount(-total_amount)
+
+        for idx, item_row in group.iterrows():
+            item_name = safe_str(item_row.get('Item Name'))
+            if not item_name and not safe_str(item_row.get('Description')):
+                continue
+            
+            item_total = item_row.get('Item Total', 0.0)
+            item_total = float(item_total) if not pd.isna(item_total) else 0.0
+
+            debit_purchase = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+            # This now refers to the mandatory 'Purchase Account' created in generate_ledgers_xml
+            etree.SubElement(debit_purchase, "LEDGERNAME").text = 'Purchase Account' # Fixed to mandatory ledger name
+            etree.SubElement(debit_purchase, "ISDEEMEDPOSITIVE").text = "Yes"
+            etree.SubElement(debit_purchase, "AMOUNT").text = format_tally_amount(item_total)
+
+            cgst_amount = float(item_row.get('CGST', 0.0)) if not pd.isna(item_row.get('CGST')) else 0.0
+            sgst_amount = float(item_row.get('SGST', 0.0)) if not pd.isna(item_row.get('SGST')) else 0.0
+            igst_amount = float(item_row.get('IGST', 0.0)) if not pd.isna(item_row.get('IGST')) else 0.0
+
+            if igst_amount > 0:
+                gst_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                etree.SubElement(gst_entry, "LEDGERNAME").text = 'Input IGST' # Fixed to mandatory ledger name
+                etree.SubElement(gst_entry, "ISDEEMEDPOSITIVE").text = "Yes"
+                etree.SubElement(gst_entry, "AMOUNT").text = format_tally_amount(igst_amount)
+            
+            if cgst_amount > 0:
+                gst_entry_cgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                etree.SubElement(gst_entry_cgst, "LEDGERNAME").text = 'Input CGST' # Fixed to mandatory ledger name
+                etree.SubElement(gst_entry_cgst, "ISDEEMEDPOSITIVE").text = "Yes"
+                etree.SubElement(gst_entry_cgst, "AMOUNT").text = format_tally_amount(cgst_amount)
+            
+            if sgst_amount > 0:
+                gst_entry_sgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                etree.SubElement(gst_entry_sgst, "LEDGERNAME").text = 'Input SGST' # Fixed to mandatory ledger name
+                etree.SubElement(gst_entry_sgst, "ISDEEMEDPOSITIVE").text = "Yes"
+                etree.SubElement(gst_entry_sgst, "AMOUNT").text = format_tally_amount(sgst_amount)
+
+        adjustment_amount = header.get('Adjustment', 0.0)
+        # Ensure adjustment_amount is float before math.isnan
+        adjustment_amount = float(adjustment_amount) if not pd.isna(adjustment_amount) else 0.0
+        
+        if adjustment_amount != 0.0:
+            round_off_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+            etree.SubElement(round_off_entry, "LEDGERNAME").text = 'Round Off' # Fixed to mandatory ledger name
+            etree.SubElement(round_off_entry, "ISDEEMEDPOSITIVE").text = "Yes" if adjustment_amount > 0 else "No"
+            etree.SubElement(round_off_entry, "AMOUNT").text = format_tally_amount(adjustment_amount)
+
+    xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
+    st.success("Generated Purchase Vouchers XML.")
+    return xml_string
+
+
+# --- Streamlit App Layout ---
+st.set_page_config(layout="wide", page_title="Zoho to Tally Migration Tool")
+
+st.title("🚀 Zoho to Tally Migration Tool")
+st.markdown("Upload your Zoho backup ZIP file, and this tool will generate Tally-compatible XML files for financial data.")
+
+st.header("1. Upload Zoho Backup ZIP")
+uploaded_file = st.file_uploader("Choose a Zoho backup ZIP file", type="zip")
+
+if uploaded_file is not None:
+    st.success(f"File '{uploaded_file.name}' uploaded successfully.")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        extract_path = os.path.join(temp_dir, "zoho_extracted")
+        os.makedirs(extract_path)
+
+        zip_temp_path = os.path.join(temp_dir, uploaded_file.name)
+        try:
+            with open(zip_temp_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+
+            st.info("Extracting ZIP file...")
+            with zipfile.ZipFile(zip_temp_path, 'r') as zip_ref:
+                zip_ref.extractall(extract_path)
+            st.info(f"Extracted Zoho ZIP to a temporary directory: {extract_path}")
+
+            raw_dfs = {}
+            missing_files = []
+            st.info("Loading raw CSV files...")
+            for zoho_csv_name in ZOHO_CSVS:
+                csv_path = os.path.join(extract_path, zoho_csv_name)
+                if os.path.exists(csv_path):
+                    try:
+                        raw_dfs[zoho_csv_name] = pd.read_csv(csv_path, encoding='utf-8', on_bad_lines='skip', low_memory=False)
+                        st.write(f"Loaded {zoho_csv_name} (raw). Rows: {len(raw_dfs[zoho_csv_name])}")
+                    except Exception as e:
+                        st.error(f"Error loading raw {zoho_csv_name}: {e}")
+                        st.exception(e) # Display full traceback for loading errors
+                        missing_files.append(zoho_csv_name) # Treat loading error as missing
+                else:
+                    missing_files.append(zoho_csv_name)
+            
+            if missing_files:
+                st.warning(f"⚠️ Warning: The following crucial Zoho CSV files were not found or could not be loaded from the ZIP: {', '.join(missing_files)}. Generated XMLs might be incomplete or inaccurate.")
+            else:
+                st.success("✅ All expected Zoho CSV files found and loaded.")
+
+            st.header("2. Processing and Mapping Data")
+            processed_dfs = {}
+            
+            # --- Call processing functions with robust error handling ---
+            try:
+                processed_dfs['coa'] = process_chart_of_accounts(raw_dfs.get('Chart_of_Accounts.csv'))
+            except Exception as e:
+                st.error("Error during Chart of Accounts processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['contacts'] = process_contacts(raw_dfs.get('Contacts.csv'))
+            except Exception as e:
+                st.error("Error during Contacts processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['vendors'] = process_vendors(raw_dfs.get('Vendors.csv'))
+            except Exception as e:
+                st.error("Error during Vendors processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['invoices'] = process_invoices(raw_dfs.get('Invoice.csv'))
+            except Exception as e:
+                st.error("Error during Invoices processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['customer_payments'] = process_customer_payments(raw_dfs.get('Customer_Payment.csv'))
+            except Exception as e:
+                st.error("Error during Customer Payments processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['vendor_payments'] = process_vendor_payments(raw_dfs.get('Vendor_Payment.csv'))
+            except Exception as e:
+                st.error("Error during Vendor Payments processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['credit_notes'] = process_credit_notes(raw_dfs.get('Credit_Note.csv'))
+            except Exception as e:
+                st.error("Error during Credit Notes processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['journals'] = process_journals(raw_dfs.get('Journal.csv'))
+            except Exception as e:
+                st.error("Error during Journals processing:")
+                st.exception(e)
+
+            try:
+                processed_dfs['bills'] = process_bills(raw_dfs.get('Bill.csv'))
+            except Exception as e:
+                st.error("Error during Bills processing:")
+                st.exception(e)
+            
+            st.success("Data cleaning and mapping attempts complete. Check for any errors above.")
+
+            st.header("3. Generate Tally XML Files")
+            generated_xmls = {}
+
+            # --- Generate XMLs in recommended order with error handling ---
+            try:
+                if processed_dfs.get('coa') is not None:
+                    generated_xmls['tally_ledgers.xml'] = generate_ledgers_xml(processed_dfs['coa'])
+                else:
+                    st.warning("Skipping Ledgers XML generation due to missing/errored Chart of Accounts data.")
+            except Exception as e:
+                st.error("Error generating Ledgers XML:")
+                st.exception(e)
+
+
+            try:
+                # Check for both contacts and vendors before attempting to generate combined XML
+                contacts_df_present = processed_dfs.get('contacts') is not None
+                vendors_df_present = processed_dfs.get('vendors') is not None
+                
+                if contacts_df_present and vendors_df_present:
+                    generated_xmls['tally_contacts_vendors.xml'] = generate_contacts_vendors_xml(processed_dfs['contacts'], processed_dfs['vendors'])
+                elif contacts_df_present:
+                    st.warning("Only Contacts data found. Attempting to generate contacts-only XML.")
+                    generated_xmls['tally_contacts_vendors.xml'] = generate_contacts_vendors_xml(processed_dfs['contacts'], None)
+                elif vendors_df_present:
+                    st.warning("Only Vendors data found. Attempting to generate vendors-only XML.")
+                    generated_xmls['tally_contacts_vendors.xml'] = generate_contacts_vendors_xml(None, processed_dfs['vendors'])
+                else:
+                    st.warning("Skipping Contacts/Vendors XML generation due to missing/errored Contacts and Vendors data.")
+            except Exception as e:
+                st.error("Error generating Contacts/Vendors XML:")
+                st.exception(e)
+
+
+            try:
+                if processed_dfs.get('invoices') is not None:
+                    generated_xmls['tally_sales_vouchers.xml'] = generate_sales_vouchers_xml(processed_dfs['invoices'])
+                else:
+                    st.warning("Skipping Sales Vouchers XML generation due to missing/errored Invoices data.")
+            except Exception as e:
+                st.error("Error generating Sales Vouchers XML:")
+                st.exception(e)
+            
+            try:
+                if processed_dfs.get('bills') is not None:
+                    generated_xmls['tally_purchase_vouchers.xml'] = generate_purchase_vouchers_xml(processed_dfs['bills'])
+                else:
+                    st.warning("Skipping Purchase Vouchers XML generation due to missing/errored Bills data.")
+            except Exception as e:
+                st.error("Error generating Purchase Vouchers XML:")
+                st.exception(e)
+
+            try:
+                if processed_dfs.get('customer_payments') is not None:
+                    generated_xmls['tally_receipt_vouchers.xml'] = generate_customer_payments_xml(processed_dfs['customer_payments'])
+                else:
+                    st.warning("Skipping Receipt Vouchers XML generation due to missing/errored Customer Payments data.")
+            except Exception as e:
+                st.error("Error generating Customer Payments XML:")
+                st.exception(e)
+
+            try:
+                if processed_dfs.get('vendor_payments') is not None:
+                    generated_xmls['tally_payment_vouchers.xml'] = generate_vendor_payments_xml(processed_dfs['vendor_payments'])
+                else:
+                    st.warning("Skipping Payment Vouchers XML generation due to missing/errored Vendor Payments data.")
+            except Exception as e:
+                st.error("Error generating Vendor Payments XML:")
+                st.exception(e)
+            
+            try:
+                if processed_dfs.get('credit_notes') is not None:
+                    generated_xmls['tally_credit_notes.xml'] = generate_credit_notes_xml(processed_dfs['credit_notes'])
+                else:
+                    st.warning("Skipping Credit Notes XML generation due to missing/errored Credit Notes data.")
+            except Exception as e:
+                st.error("Error generating Credit Notes XML:")
+                st.exception(e)
+
+            try:
+                if processed_dfs.get('journals') is not None:
+                    generated_xmls['tally_journal_vouchers.xml'] = generate_journal_vouchers_xml(processed_dfs['journals'])
+                else:
+                    st.warning("Skipping Journal Vouchers XML generation due to missing/errored Journals data.")
+            except Exception as e:
+                st.error("Error generating Journal Vouchers XML:")
+                st.exception(e)
+            
+            st.success("Tally XML generation attempts complete. Check for any errors above.")
+
+            st.header("4. Download Generated XML Files")
+            if generated_xmls:
+                st.success("Your Tally XML files are ready for download:")
+                for filename, xml_content in generated_xmls.items():
+                    st.download_button(
+                        label=f"Download {filename}",
+                        data=xml_content.encode('utf-8'),
+                        file_name=filename,
+                        mime="application/xml"
+                    )
+                st.info("Remember to import masters first, then vouchers, into your Tally ERP company.")
+            else:
+                st.warning("No XML files were generated. Please review the warnings/errors above.")
+
+        except zipfile.BadZipFile:
+            st.error("The uploaded file is not a valid ZIP file. Please upload a correctly formatted Zoho backup ZIP.")
+        except Exception as e:
+            st.error(f"An unexpected error occurred during the overall process: {e}")
+            st.exception(e) # Show full traceback for high-level errors
+
+    st.markdown("---")
+
+# --- 04_batch_import_instructions.md content displayed directly ---
+st.header("5. Tally Import Instructions & Troubleshooting")
+st.markdown(f"""
+# Importing Data into Tally ERP
+
+This guide provides step-by-step instructions on how to import the generated XML files (`.xml`) into your Tally ERP company.
+
+**🚨 IMPORTANT WARNINGS & BEST PRACTICES 🚨**
+
+* **TEST FIRST:** **ALWAYS perform a test import** into a brand-new, empty Tally company before attempting to import into your live production company. This is the single most important step to identify and resolve any mapping issues or errors without corrupting your actual data.
+* **BACKUP:** Before any import into your live Tally company, take a **complete backup** of your Tally data.
+* **TALLY COMPANY NAME:** Ensure the Tally Company Name in the script's configuration (`{TALLY_COMPANY_NAME}`) **exactly matches** the company you are importing into in Tally.
+* **<span style="color:red;font-weight:bold;">CRITICAL: TALLY FINANCIAL YEAR SETTING</span>**: Your previous import logs showed many "The date is Out of Range!" errors. This is because your Zoho transactions are from 2023, but your new Tally company likely defaults to the current financial year (e.g., Apr 2025 - Mar 2026). **The Python script CANNOT change this in Tally.**
+    * **Action**: Before importing any transactions, you **MUST** change your Tally company's financial year to encompass your oldest transaction date.
+        1.  Open Tally (Prime or ERP 9).
+        2.  Select your company (`{TALLY_COMPANY_NAME}`).
+        3.  Go to `Gateway of Tally`.
+        4.  In Tally Prime: Press `Alt + K` (Company) -> `Alter`.
+        5.  In Tally ERP 9: Press `Alt + F3` (Company Info) -> `Alter`.
+        6.  Set `Financial year from` and `Books beginning from` to a date *before or equal to your oldest Zoho transaction*. For example, if your oldest Zoho transaction is `20-Jul-2023`, set both fields to **`1-Apr-2023`** (if your financial year is April-March) or **`1-Jan-2023`** (if your financial year is Jan-Dec).
+        7.  Accept the changes (`Ctrl + A`).
+* **LEDGER NAMES (Check if still needed after mandatory ledgers)**: The script now attempts to create essential ledgers like 'Sales Account', 'Purchase Account', 'Round Off', and standard GST ledgers (`Output/Input CGST/SGST/IGST`), and 'Transportation Expense'.
+    * **Action for "Ledger does not exist!" errors if they persist**: If these errors still occur after using this updated script and importing `tally_ledgers.xml`, it means a specific ledger referenced in a transaction (especially from `Journal.csv`'s 'Account' column) is still not found. You will need to:
+        1.  **Identify the exact ledger name** from the Tally error log.
+        2.  **Manually create that ledger** in your Tally company (e.g., `Gateway of Tally > Create > Ledger`) under the appropriate Tally Group (e.g., "Indirect Expenses" for an expense, "Sales Accounts" for a revenue).
+        3.  **Ensure its exact spelling and case** matches the error message.
+        4.  Then, try importing the problematic XML file again.
+* **DUPLICATE VOUCHER NUMBERS (HIGH RISK)**: You mentioned that duplicate entries are "ok". However, for `VOUCHERNUMBER` (e.g., Invoice Number, Payment Number, Bill Number, Journal Number), Tally typically expects these to be unique per voucher type. If your source Zoho data has truly distinct transactions sharing the *same* `Invoice Number` (etc.), Tally might:
+    * Reject subsequent vouchers with the same number.
+    * Overwrite existing vouchers.
+    * Cause incorrect bill-wise adjustments.
+    * The app uses the `Invoice Number`/`Bill Number`/`Payment Number` as is. If these are truly duplicated for *different logical transactions* in your Zoho export, you may still encounter import issues. The safest approach is always to make these numbers unique in your source CSVs before import.
+
+---
+
+## Import Sequence
+
+Tally generally requires a specific sequence for importing data to maintain data integrity. It's crucial to import **Masters** (Ledgers, Contacts/Vendors) before **Vouchers** (Transactions) that refer to those masters.
+
+1.  **Masters:**
+    * `tally_ledgers.xml` (Chart of Accounts, general ledgers and groups, now including common mandatory ledgers)
+    * `tally_contacts_vendors.xml` (Customers as Sundry Debtors, Vendors as Sundry Creditors)
+
+2.  **Vouchers (Financial Transactions):**
+    * `tally_sales_vouchers.xml` (from Zoho Invoices)
+    * `tally_purchase_vouchers.xml` (from Zoho Bills)
+    * `tally_receipt_vouchers.xml` (from Zoho Customer Payments)
+    * `tally_payment_vouchers.xml` (from Zoho Vendor Payments)
+    * `tally_credit_notes.xml` (from Zoho Credit Notes)
+    * `tally_journal_vouchers.xml` (from Zoho Journals)
+
+---
+
+## Step-by-Step Import Process in Tally ERP
+
+1.  **<span style="color:red;font-weight:bold;">CRITICAL PRE-STEP: Adjust Tally Financial Year (as instructed above).</span>**
+2.  **Open your Tally ERP Company:**
+    * Launch Tally ERP 9 or Tally Prime.
+    * Select the **new, empty company** you created for testing purposes (e.g., `'{TALLY_COMPANY_NAME}'`).
+3.  **Locate the Generated XML Files:**
+    * The XML files are located in the `output/` directory relative to where you ran `zoho_to_tally_app.py`.
+    * Example Path: `C:\path\to\your\ZohoTallyMigration\output\` (if running locally)
+4.  **Navigate to Import Data in Tally:**
+    * From the **Gateway of Tally**:
+        * Press `Alt + O` (Import Data)
+        * Select `Masters` for ledger/group XMLs.
+        * Select `Vouchers` for transaction XMLs.
+5.  **Specify the XML File and Behavior:**
+    * **For Masters (Ledgers, Contacts/Vendors):**
+        * Go to `Import Data` > `Masters`.
+        * **File to Import (XML):** Enter the full path to the XML file (e.g., `C:\path\to\your\ZohoTallyMigration\output\tally_ledgers.xml`).
+        * **Behavior of Masters already existing:** `Combine Opening Balances` (or `Add New Masters`).
+    * **For Vouchers (Sales, Purchase, Payments, etc.):**
+        * Go to `Import Data` > `Vouchers`.
+        * **File to Import (XML):** Enter the full path to the XML file (e.g., `C:\path\to\your\ZohoTallyMigration\output\tally_sales_vouchers.xml`).
+        * **Behavior of Vouchers already existing:** `Add New Vouchers`. (Avoid `Replace Existing Vouchers` unless you know exactly what you're doing).
+6.  **Initiate Import:**
+    * After specifying the file path and behavior, press `Enter` to start the import process.
+7.  **Monitor the Import:**
+    * Tally will display a progress bar and then a summary message indicating the number of masters/vouchers imported and/or skipped.
+    * If errors occur, Tally will usually pop up an error window or provide details in the Tally.ERP9.err (or similar) log file located in your Tally installation directory.
+
+---
+
+## Detailed Import for Each XML File (Recommended Order)
+
+### 1. Import Master Data
+
+**a. Ledgers and Groups**
+* **File:** `tally_ledgers.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Masters`
+* **Behavior:** `Combine Opening Balances` (or `Add New Masters`)
+* **Verification:** After import, navigate to `Gateway of Tally` > `Display More Reports` > `List of Accounts`. Check under various groups (e.g., 'Indirect Expenses', 'Bank Accounts', 'Sales Accounts', 'Purchase Accounts', 'Duties & Taxes') to ensure all your Zoho Chart of Accounts entries, plus the newly added mandatory ledgers, have been created as Ledgers in Tally with their correct parent groups.
+
+**b. Contacts (Sundry Debtors) and Vendors (Sundry Creditors)**
+* **File:** `tally_contacts_vendors.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Masters`
+* **Behavior:** `Combine Opening Balances` (or `Add New Masters`)
+* **Verification:** Check `Gateway of Tally` > `Display More Reports` > `List of Accounts` under `Sundry Debtors` and `Sundry Creditors`. Select a few parties and drill down (`Alt+L`) to verify their addresses, GSTINs, contact details, and opening balances.
+
+### 2. Import Financial Vouchers
+
+**a. Sales Vouchers (from Invoices)**
+* **File:** `tally_sales_vouchers.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
+* **Behavior:** `Add New Vouchers`
+* **Verification:**
+    * Check `Gateway of Tally` > `Display More Reports` > `Day Book`. Review a sample of imported Sales Vouchers.
+    * Drill down into a few vouchers to verify: Party Name and details, Date and Voucher Number, Sales Ledger, amounts, and GST application (CGST/SGST/IGST), Narration.
+    * **Crucially, check `Bill-wise Details` (Alt+B or specific button) for 'New Ref' against the invoice number.**
+    * Check individual Customer Ledger accounts (`Display More Reports` > `Account Books` > `Ledger` > Select Customer) to ensure balances are correct and bill-wise details reflect the new invoices.
+
+**b. Purchase Vouchers (from Bills)**
+* **File:** `tally_purchase_vouchers.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
+* **Behavior:** `Add New Vouchers`
+* **Verification:**
+    * Check `Gateway of Tally` > `Display More Reports` > `Day Book`. Review a sample of imported Purchase Vouchers.
+    * Verify Party Name, Date, Voucher Number, Purchase Ledger, amounts, GST, and **`Bill-wise Details` for 'New Ref' against the bill number.**
+    * Check individual Vendor Ledger accounts for correct balances and bill-wise details.
+
+**c. Receipt Vouchers (from Customer Payments)**
+* **File:** `tally_receipt_vouchers.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
+* **Behavior:** `Add New Vouchers`
+* **Verification:**
+    * Check `Day Book`. Verify Bank/Cash ledger debit and Customer ledger credit.
+    * **Crucially, verify `Bill-wise Details` (Alt+B or specific button) for 'Agst Ref' matching the invoice number(s) paid.**
+    * Check customer ledgers to ensure payments have reduced outstanding invoices.
+
+**d. Payment Vouchers (from Vendor Payments)**
+* **File:** `tally_payment_vouchers.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
+* **Behavior:** `Add New Vouchers`
+* **Verification:**
+    * Check `Day Book`. Verify Vendor ledger debit and Bank/Cash ledger credit.
+    * **Crucially, verify `Bill-wise Details` (Alt+B or specific button) for 'Agst Ref' matching the bill number(s) paid.**
+    * Check vendor ledgers to ensure payments have reduced outstanding bills.
+
+**e. Credit Note Vouchers**
+* **File:** `tally_credit_notes.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
+* **Behavior:** `Add New Vouchers`
+* **Verification:**
+    * Check `Day Book`. Verify Sales Returns (or similar) ledger debit and Customer ledger credit.
+    * **Check for linking to Original Invoice Details for GST purposes.**
+    * Verify `Bill-wise Details` (Alt+B or specific button) for 'Agst Ref' if the credit note was applied against a specific invoice.
+
+**f. Journal Vouchers**
+* **File:** `tally_journal_vouchers.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
+* **Behavior:** `Add New Vouchers`
+* **Verification:**
+    * Check `Day Book`. Drill down into a few journal vouchers to ensure the debit and credit legs for each entry are correct and balanced.
+    * Check affected ledger accounts to see if the journal entries have the intended impact on balances.
+
+---
+
+## Troubleshooting Common Import Errors
+
+When Tally throws an error during import, it often means:
+
+1.  **"Ledger Not Found"**:
+    * **Cause:** A ledger name specified in the XML (e.g., a customer, vendor, income, expense, or tax ledger) does not exist in your Tally company with the exact name.
+    * **Solution:** The updated script attempts to create common ledgers. If this error still occurs, it means a specific ledger used in a transaction (particularly from `Journal.csv`'s 'Account' column) is not one of the mandatory ones and also not in your Zoho `Chart_of_Accounts.csv`. You **must manually create that ledger in Tally** with the exact name.
+
+2.  **"Invalid Date Format"**:
+    * **Cause:** The date format in the XML is not `YYYYMMDD`.
+    * **Solution:** The Python script aims to format dates correctly. If this error occurs, investigate the original Zoho date format in your source CSVs.
+
+3.  **"Error in XML Structure" / "Invalid XML Tag"**:
+    * **Cause:** The XML generated has a syntax error, incorrect tag names, or improper nesting according to Tally's schema.
+    * **Solution:** This is rare if the script runs without errors, but if it happens, there might be a subtle bug or an edge case in your data.
+
+4.  **"Amount Mismatch" / "Debit-Credit Imbalance"**:
+    * **Cause:** For a voucher (e.g., Sales, Purchase, Journal), the total debits do not equal total credits. This is a fundamental accounting principle.
+    * **Solution:** Review your data in the original Zoho CSVs and how totals are calculated (e.g., `Item Total`, `SubTotal`, `Total`, `Adjustment`, taxes). The script includes warnings for imbalanced journals.
+
+5.  **GST Related Errors**:
+    * **Cause:** Incorrect GSTIN, wrong GST registration type, mismatch between state code and GSTIN, or incorrect tax ledgers being used for intra/inter-state transactions.
+    * **Solution:** Verify the `GSTIN` and `GST Treatment` fields for your customers/vendors and invoices/bills. Confirm the mapping of `Place of Supply(With State Code)` in the script. Ensure your 'Output CGST', 'Output SGST', 'Output IGST', 'Input CGST', 'Input SGST', 'Input IGST' ledgers exist in Tally and are configured correctly as 'Duties & Taxes' with the appropriate GST types and percentages.
+
+---
+
+## Final Post-Import Verification
+
+After successfully importing all XML files into your **test Tally company**:
+
+* **Trial Balance:** Compare the Trial Balance generated in Tally with your Zoho's Trial Balance report as of the migration cut-off date.
+* **Balance Sheet & Profit & Loss:** Review these financial statements for accuracy and consistency with Zoho.
+* **Account Books:** Drill down into key ledger accounts (e.g., your Bank accounts, Cash, Sundry Debtors, Sundry Creditors) and cross-verify their balances and transactions with Zoho.
+* **Outstanding Receivables/Payables:** Verify that the 'Bills Receivable' and 'Bills Payable' reports in Tally match the outstanding amounts in Zoho.
+* **GST Reports (if applicable):** Generate GSTR-1 and GSTR-2 (or relevant GST reports) in Tally and compare them with your Zoho GST reports for the migrated period.
+* **Sample Vouchers:** Randomly open 5-10 vouchers of each type (Sales, Purchase, Receipt, Payment, Journal, Credit Note) and compare every detail (date, amount, ledger allocation, narration, bill-wise details) against the original Zoho data.
+
+Once you are confident in the accuracy of the imported data in your test company, you can proceed to import into your live Tally company (after taking a fresh backup!).
+""")
