@@ -79,7 +79,7 @@ def create_tally_envelope(report_name="All Masters", request_xml_tags="ACCOUNTS"
     header = etree.SubElement(envelope, "HEADER")
     etree.SubElement(header, "TALLYREQUEST").text = "Import"
     etree.SubElement(header, "VERSION").text = "1" # Or higher based on Tally version
-    body = etree.SubElement(envelope, "BODY")
+    body = etree.SubElement(body, "BODY")
     import_data = etree.SubElement(body, "IMPORTDATA")
     request_desc = etree.SubElement(import_data, "REQUESTDESC")
     etree.SubElement(request_desc, "REPORTNAME").text = report_name
@@ -1008,7 +1008,7 @@ def generate_sales_vouchers_xml(df_invoices):
             etree.SubElement(generic_sales_entry, "ISDEEMEDPOSITIVE").text = "Yes"
             etree.SubElement(generic_sales_entry, "AMOUNT").text = format_tally_amount(total_amount)
         elif not has_item_entries and total_amount == 0.0:
-             st.warning(f"Voucher ID: {invoice_id} ({header.get('Invoice Number', '')}) has no valid line items and a total amount of 0.0. This voucher will likely be skipped by Tally or result in an empty voucher if imported.")
+             st.info(f"Voucher ID: {invoice_id} ({header.get('Invoice Number', '')}) has no valid line items and a total amount of 0.0. This voucher will likely be skipped by Tally if it has no entries.")
 
 
     xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
@@ -1757,4 +1757,111 @@ Tally generally requires a specific sequence for importing data to maintain data
 ### 1. Import Master Data
 
 **a. Ledgers and Groups**
-* **File:** `tally_ledgers.xml
+* **File:** `tally_ledgers.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Masters`
+* **Behavior:** `Combine Opening Balances` (or `Add New Masters`)
+* **Verification:** After import, navigate to `Gateway of Tally` > `Display More Reports` > `List of Accounts`. Check under various groups (e.g., 'Indirect Expenses', 'Bank Accounts', 'Sales Accounts', 'Purchase Accounts', 'Duties & Taxes') to ensure all your Zoho Chart of Accounts entries, plus the newly added mandatory ledgers, have been created as Ledgers in Tally with their correct parent groups.
+
+**b. Contacts (Sundry Debtors) and Vendors (Sundry Creditors)**
+* **File:** `tally_contacts_vendors.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Masters`
+* **Behavior:** `Combine Opening Balances` (or `Add New Masters`)
+* **Verification:** Check `Gateway of Tally` > `Display More Reports` > `List of Accounts` under `Sundry Debtors` and `Sundry Creditors`. Select a few parties and drill down (`Alt+L`) to verify their addresses, GSTINs, contact details, and opening balances.
+
+### 2. Import Financial Vouchers
+
+**a. Sales Vouchers (from Invoices)**
+* **File:** `tally_sales_vouchers.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
+* **Behavior:** `Add New Vouchers`
+* **Verification:**
+    * Check `Gateway of Tally` > `Display More Reports` > `Day Book`. Review a sample of imported Sales Vouchers.
+    * Drill down into a few vouchers to verify: Party Name and details, Date and Voucher Number, Sales Ledger, amounts, and GST application (CGST/SGST/IGST), Narration.
+    * **Crucially, check `Bill-wise Details` (Alt+B or specific button) for 'New Ref' against the invoice number.**
+    * Check individual Customer Ledger accounts (`Display More Reports` > `Account Books` > `Ledger` > Select Customer) to ensure balances are correct and bill-wise details reflect the new invoices.
+
+**b. Purchase Vouchers (from Bills)**
+* **File:** `tally_purchase_vouchers.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
+* **Behavior:** `Add New Vouchers`
+* **Verification:**
+    * Check `Gateway of Tally` > `Display More Reports` > `Day Book`. Review a sample of imported Purchase Vouchers.
+    * Verify Party Name, Date, Voucher Number, Purchase Ledger, amounts, GST, and **`Bill-wise Details` for 'New Ref' against the bill number.**
+    * Check individual Vendor Ledger accounts for correct balances and bill-wise details.
+
+**c. Receipt Vouchers (from Customer Payments)**
+* **File:** `tally_receipt_vouchers.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
+* **Behavior:** `Add New Vouchers`
+* **Verification:**
+    * Check `Day Book`. Verify Bank/Cash ledger debit and Customer ledger credit.
+    * **Crucially, verify `Bill-wise Details` (Alt+B or specific button) for 'Agst Ref' matching the invoice number(s) paid.**
+    * Check customer ledgers to ensure payments have reduced outstanding invoices.
+
+**d. Payment Vouchers (from Vendor Payments)**
+* **File:** `tally_payment_vouchers.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
+* **Behavior:** `Add New Vouchers`
+* **Verification:**
+    * Check `Day Book`. Verify Vendor ledger debit and Bank/Cash ledger credit.
+    * **Crucially, verify `Bill-wise Details` (Alt+B or specific button) for 'Agst Ref' matching the bill number(s) paid.**
+    * Check vendor ledgers to ensure payments have reduced outstanding bills.
+
+**e. Credit Note Vouchers**
+* **File:** `tally_credit_notes.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
+* **Behavior:** `Add New Vouchers`
+* **Verification:**
+    * Check `Day Book`. Verify Sales Returns (or similar) ledger debit and Customer ledger credit.
+    * **Check for linking to Original Invoice Details for GST purposes.**
+    * Verify `Bill-wise Details` (Alt+B or specific button) for 'Agst Ref' if the credit note was applied against a specific invoice.
+
+**f. Journal Vouchers**
+* **File:** `tally_journal_vouchers.xml`
+* **Tally Menu:** `Gateway of Tally` > `Import Data` > `Vouchers`
+* **Behavior:** `Add New Vouchers`
+* **Verification:**
+    * Check `Day Book`. Drill down into a few journal vouchers to ensure the debit and credit legs for each entry are correct and balanced.
+    * Check affected ledger accounts to see if the journal entries have the intended impact on balances.
+
+---
+
+## Troubleshooting Common Import Errors
+
+When Tally throws an error during import, it often means:
+
+1.  **"Ledger Not Found"**:
+    * **Cause:** A ledger name specified in the XML (e.g., a customer, vendor, income, expense, or tax ledger) does not exist in your Tally company with the exact name.
+    * **Solution:** The updated script attempts to create common ledgers. If this error still occurs, it means a specific ledger used in a transaction (particularly from `Journal.csv`'s 'Account' column) is not one of the mandatory ones and also not in your Zoho `Chart_of_Accounts.csv`. You **must manually create that ledger in Tally** with the exact name.
+
+2.  **"Invalid Date Format"**:
+    * **Cause:** The date format in the XML is not `YYYYMMDD`.
+    * **Solution:** The Python script aims to format dates correctly. If this error occurs, investigate the original Zoho date format in your source CSVs.
+
+3.  **"Error in XML Structure" / "Invalid XML Tag"**:
+    * **Cause:** The XML generated has a syntax error, incorrect tag names, or improper nesting according to Tally's schema.
+    * **Solution:** This is rare if the script runs without errors, but if it happens, there might be a subtle bug or an edge case in your data.
+
+4.  **"Amount Mismatch" / "Debit-Credit Imbalance"**:
+    * **Cause:** For a voucher (e.g., Sales, Purchase, Journal), the total debits do not equal total credits. This is a fundamental accounting principle.
+    * **Solution:** Review your data in the original Zoho CSVs and how totals are calculated (e.g., `Item Total`, `SubTotal`, `Total`, `Adjustment`, taxes). The script includes warnings for imbalanced journals.
+
+5.  **GST Related Errors**:
+    * **Cause:** Incorrect GSTIN, wrong GST registration type, mismatch between state code and GSTIN, or incorrect tax ledgers being used for intra/inter-state transactions.
+    * **Solution:** Verify the `GSTIN` and `GST Treatment` fields for your customers/vendors and invoices/bills. Confirm the mapping of `Place of Supply(With State Code)` in the script. Ensure your 'Output CGST', 'Output SGST', 'Output IGST', 'Input CGST', 'Input SGST', 'Input IGST' ledgers exist in Tally and are configured correctly as 'Duties & Taxes' with the appropriate GST types and percentages.
+
+---
+
+## Final Post-Import Verification
+
+After successfully importing all XML files into your **test Tally company**:
+
+* **Trial Balance:** Compare the Trial Balance generated in Tally with your Zoho's Trial Balance report as of the migration cut-off date.
+* **Balance Sheet & Profit & Loss:** Review these financial statements for accuracy and consistency with Zoho.
+* **Account Books:** Drill down into key ledger accounts (e.g., your Bank accounts, Cash, Sundry Debtors, Sundry Creditors) and cross-verify their balances and transactions with Zoho.
+* **Outstanding Receivables/Payables:** Verify that the 'Bills Receivable' and 'Bills Payable' reports in Tally match the outstanding amounts in Zoho.
+* **GST Reports (if applicable):** Generate GSTR-1 and GSTR-2 (or relevant GST reports) in Tally and compare them with your Zoho GST reports for the migrated period.
+* **Sample Vouchers:** Randomly open 5-10 vouchers of each type (Sales, Purchase, Receipt, Payment, Journal, Credit Note) and compare every detail (date, amount, ledger allocation, narration, bill-wise details) against the original Zoho data.
+
+Once you are confident in the accuracy of the imported data in your test company, you can proceed to import into your live Tally company (after taking a fresh backup!).
+""")
