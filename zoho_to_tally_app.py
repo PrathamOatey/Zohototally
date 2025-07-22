@@ -129,7 +129,7 @@ def clean_numeric_column(df, column_name):
         # Now convert to numeric, coercing any remaining errors to NaN
         df[column_name] = pd.to_numeric(df[column_name], errors='coerce')
 
-        # Identify values that became NaN due to coercion (meaning they were non-numeric or empty after regex)
+        # Identify values that became NaN due to coercion (meaning they were non-numeric)
         non_numeric_mask = df[column_name].isna()
         initial_non_numeric_count = non_numeric_mask.sum()
         
@@ -147,7 +147,7 @@ def clean_numeric_column(df, column_name):
         df[column_name] = df[column_name].fillna(0.0)
     return df
 
-# NEW HELPER for Tax Percentage columns (still needed if `clean_numeric_column` is not generic enough for all formats)
+# NEW HELPER for Tax Percentage columns
 def extract_numeric_from_tax_string(value):
     """Extracts numeric part from strings like 'IGST12%' or 'CGST 5%'."""
     s_value = str(value)
@@ -794,7 +794,7 @@ def generate_contacts_vendors_xml(df_contacts, df_vendors):
         address1 = safe_str(row.get(f'Tally_{prefix}_Address_Line1', ''))
         address2 = safe_str(row.get(f'Tally_{prefix}_Address_Line2', ''))
         city = safe_str(row.get(f'{prefix} City', ''))
-        state = safe_str(row.get(f'Tally_{prefix}_State', ''))
+        state = safe_str(row.get(f'{prefix} State', ''))
         country = safe_str(row.get(f'{prefix} Country', '')) or DEFAULT_COUNTRY
         pincode = safe_str(row.get(f'{prefix} Code', ''))
 
@@ -1696,11 +1696,8 @@ if uploaded_file is not None:
             st.error(f"An unexpected error occurred during the overall process: {e}")
             st.exception(e) # Show full traceback for high-level errors
 
-    st.markdown("---")
-
-# --- 04_batch_import_instructions.md content displayed directly ---
-st.header("5. Tally Import Instructions & Troubleshooting")
-st.markdown(f"""
+    st.markdown(f"""
+---
 # Importing Data into Tally ERP
 
 This guide provides step-by-step instructions on how to import the generated XML files (`.xml`) into your Tally ERP company.
@@ -1894,3 +1891,4 @@ After successfully importing all XML files into your **test Tally company**:
 * **Sample Vouchers:** Randomly open 5-10 vouchers of each type (Sales, Purchase, Receipt, Payment, Journal, Credit Note) and compare every detail (date, amount, ledger allocation, narration, bill-wise details) against the original Zoho data.
 
 Once you are confident in the accuracy of the imported data in your test company, you can proceed to import into your live Tally company (after taking a fresh backup!).
+""")
