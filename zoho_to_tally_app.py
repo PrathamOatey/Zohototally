@@ -79,7 +79,7 @@ def create_tally_envelope(report_name="All Masters", request_xml_tags="ACCOUNTS"
     header = etree.SubElement(envelope, "HEADER")
     etree.SubElement(header, "TALLYREQUEST").text = "Import"
     etree.SubElement(header, "VERSION").text = "1" # Or higher based on Tally version
-    body = etree.SubElement(envelope, "BODY") # FIXED: 'body' is now correctly initialized as sub-element of 'envelope'
+    body = etree.SubElement(envelope, "BODY")
     import_data = etree.SubElement(body, "IMPORTDATA")
     request_desc = etree.SubElement(import_data, "REQUESTDESC")
     etree.SubElement(request_desc, "REPORTNAME").text = report_name
@@ -104,26 +104,32 @@ def format_date_column(df, column_name):
 
 def clean_numeric_column(df, column_name):
     """
-    Converts a column to numeric, handling common non-numeric characters
-    like currency symbols and commas, then fills NaNs with 0.0.
+    Converts a column to numeric, handling common non-numeric characters,
+    currency symbols, and commas by extracting only the numerical part.
+    Then fills NaNs with 0.0.
     """
     if column_name in df.columns:
         # Store original values for warning messages
         original_col_series = df[column_name].copy()
 
-        # Convert to string first to apply regex safely
+        # Convert to string to apply regex
         df[column_name] = df[column_name].astype(str)
 
-        # Regex to remove common currency symbols, commas, and trim whitespace
-        # This regex targets "INR ", "INR", "₹", "$" and commas
+        # Enhanced regex:
+        # - `[+-]?`: Optional leading plus or minus sign.
+        # - `(?:\d{1,3}(?:,\d{3})*|\d+)`: Matches numbers with optional thousands separators (e.g., 1,234.56 or 1234).
+        # - `(?:\.\d+)?`: Optional decimal part.
+        # This will extract the numerical string. Example: "INR 1,234.56" -> "1,234.56" ; "IGST12" -> "12"
+        # It's better to extract then clean commas, rather than removing all non-digits/decimals initially,
+        # which might break negative numbers or decimals.
         df[column_name] = df[column_name].apply(
-            lambda x: re.sub(r'INR\s*|INR|\$|₹|,', '', x).strip()
-        )
+            lambda x: re.findall(r'[+-]?\d+(?:,\d{3})*(?:\.\d+)?', x)
+        ).str.join('').str.replace(',', '') # Extract numbers, then remove commas
 
         # Now convert to numeric, coercing any remaining errors to NaN
         df[column_name] = pd.to_numeric(df[column_name], errors='coerce')
 
-        # Identify values that became NaN due to coercion (meaning they were non-numeric)
+        # Identify values that became NaN due to coercion (meaning they were non-numeric or empty after regex)
         non_numeric_mask = df[column_name].isna()
         initial_non_numeric_count = non_numeric_mask.sum()
         
@@ -134,14 +140,14 @@ def clean_numeric_column(df, column_name):
             if len(sample_non_numeric) > 0:
                 st.warning(f"  - Warning: Column '{column_name}' contained {initial_non_numeric_count} non-numeric entries (e.g., '{sample_non_numeric[0]}'). Coerced to 0.0.")
             else:
-                # This case is for empty strings/whitespace that become NaN
+                # This case is for empty strings/whitespace that become NaN after regex
                 st.warning(f"  - Warning: Column '{column_name}' contained {initial_non_numeric_count} empty/whitespace entries. Coerced to 0.0.")
 
         # Fill any NaN (original or coerced) with 0.0
         df[column_name] = df[column_name].fillna(0.0)
     return df
 
-# NEW HELPER for Tax Percentage columns
+# NEW HELPER for Tax Percentage columns (still needed if `clean_numeric_column` is not generic enough for all formats)
 def extract_numeric_from_tax_string(value):
     """Extracts numeric part from strings like 'IGST12%' or 'CGST 5%'."""
     s_value = str(value)
@@ -402,7 +408,7 @@ def process_invoices(df):
         'Shipping Phone Number', 'Supplier Org Name', 'Supplier GST Registration Number',
         'Supplier Street Address', 'Supplier City', 'Supplier State', 'Supplier Country',
         'Supplier ZipCode', 'Supplier Phone', 'Supplier E-Mail',
-        'Reverse Charge Tax Name', 'Reverse Charge Tax Type', 'Item TDS Name',
+        'Reverse Charge Tax Name', 'Reverse Charge Tax Rate', 'Reverse Charge Tax Type', 'Item TDS Name',
         'Item TDS Section Code', 'Item TDS Section',
         'GST Identification Number (GSTIN)', 'Nature Of Collection', 'SKU', 'Project ID', 'Project Name', 'HSN/SAC',
         'Round Off', 'Sales person', 'Subject', 'Primary Contact EmailID', 'Primary Contact Mobile',
@@ -1330,10 +1336,8 @@ def generate_journal_vouchers_xml(df_journals):
             if pd.isna(debit_amount): debit_amount = 0.0
             if pd.isna(credit_amount): credit_amount = 0.0
 
-            # Only add entry if there's a non-zero amount or a ledger name
-            # A journal entry with zero amounts but a ledger name might be valid, but typically isn't.
-            # We add a check for ledger_name to ensure something valid is being processed.
-            if (debit_amount > 0 or credit_amount > 0) or ledger_name:
+            # Only add entry if there's a non-zero amount or a ledger name is present (for truly zero-value entries)
+            if (debit_amount != 0.0 or credit_amount != 0.0) or (ledger_name and not has_entries): # Ensure at least one entry gets created if the journal itself isn't zero total
                 ledger_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
                 etree.SubElement(ledger_entry, "LEDGERNAME").text = ledger_name
                 if debit_amount > 0:
@@ -1890,4 +1894,3 @@ After successfully importing all XML files into your **test Tally company**:
 * **Sample Vouchers:** Randomly open 5-10 vouchers of each type (Sales, Purchase, Receipt, Payment, Journal, Credit Note) and compare every detail (date, amount, ledger allocation, narration, bill-wise details) against the original Zoho data.
 
 Once you are confident in the accuracy of the imported data in your test company, you can proceed to import into your live Tally company (after taking a fresh backup!).
-""")
