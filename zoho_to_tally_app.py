@@ -320,8 +320,7 @@ def process_invoices(df):
         'Shipping Charge Tax Amount', 'Shipping Charge Tax %', 'Quantity', 'Discount',
         'Discount Amount', 'Item Total', 'Item Price', 'CGST Rate %', 'SGST Rate %',
         'IGST Rate %', 'CESS Rate %', 'CGST', 'SGST', 'IGST', 'CESS',
-        'Reverse Charge Tax Name', 'Reverse Charge Tax Rate', 'Reverse Charge Tax Type',
-        'Item TDS Percentage', 'Item TDS Amount',
+        'Reverse Charge Tax Rate', 'Item TDS Percentage', 'Item TDS Amount',
         'Round Off', 'Shipping Bill Total', 'Item Tax', 'Item Tax %', 'Item Tax Amount',
     ]
     for col in numeric_cols:
@@ -353,7 +352,7 @@ def process_invoices(df):
         'Shipping Phone Number', 'Supplier Org Name', 'Supplier GST Registration Number',
         'Supplier Street Address', 'Supplier City', 'Supplier State', 'Supplier Country',
         'Supplier ZipCode', 'Supplier Phone', 'Supplier E-Mail',
-        'Reverse Charge Tax Name', 'Reverse Charge Tax Type', 'Item TDS Name',
+        'Reverse Charge Tax Name', 'Reverse Charge Tax Rate', 'Reverse Charge Tax Type', 'Item TDS Name',
         'Item TDS Section Code', 'Item TDS Section',
         'GST Identification Number (GSTIN)', 'Nature Of Collection', 'SKU', 'Project ID', 'Project Name', 'HSN/SAC',
         'Round Off', 'Sales person', 'Subject', 'Primary Contact EmailID', 'Primary Contact Mobile',
@@ -1056,7 +1055,7 @@ def generate_vendor_payments_xml(df_payments):
 
         bill_number = safe_str(row.get('Bill Number'))
         bill_amount_applied = row.get('Bill Amount', 0.0)
-        if pd.isna(bill_amount_applied): bill_amount_applied = 0.0
+        if pd.isna(bill_amount_applied): amount_applied = 0.0
 
         if bill_number and bill_amount_applied != 0:
             bill_allocation = etree.SubElement(debit_vendor, "BILLALLOCATIONS.LIST")
@@ -1457,87 +1456,86 @@ if uploaded_file is not None:
             st.header("3. Generate Tally XML Files")
             generated_xmls = {}
 
-            # --- Generate XMLs in recommended order with error handling ---
+            # --- Generate XMLs in recommended order with empty DataFrame check ---
             try:
-                if processed_dfs.get('coa') is not None:
+                if processed_dfs.get('coa') is not None and not processed_dfs['coa'].empty:
                     generated_xmls['tally_ledgers.xml'] = generate_ledgers_xml(processed_dfs['coa'])
                 else:
-                    st.warning("Skipping Ledgers XML generation due to missing/errored Chart of Accounts data.")
+                    st.info("Skipping tally_ledgers.xml generation as Chart of Accounts data is empty.")
             except Exception as e:
                 st.error("Error generating Ledgers XML:")
                 st.exception(e)
 
 
             try:
-                # Check for both contacts and vendors before attempting to generate combined XML
-                contacts_df_present = processed_dfs.get('contacts') is not None
-                vendors_df_present = processed_dfs.get('vendors') is not None
+                contacts_df_present = processed_dfs.get('contacts') is not None and not processed_dfs['contacts'].empty
+                vendors_df_present = processed_dfs.get('vendors') is not None and not processed_dfs['vendors'].empty
                 
                 if contacts_df_present and vendors_df_present:
                     generated_xmls['tally_contacts_vendors.xml'] = generate_contacts_vendors_xml(processed_dfs['contacts'], processed_dfs['vendors'])
                 elif contacts_df_present:
-                    st.warning("Only Contacts data found. Attempting to generate contacts-only XML.")
+                    st.warning("Only Contacts data found (Vendors data is empty/missing). Attempting to generate contacts-only XML.")
                     generated_xmls['tally_contacts_vendors.xml'] = generate_contacts_vendors_xml(processed_dfs['contacts'], None)
                 elif vendors_df_present:
-                    st.warning("Only Vendors data found. Attempting to generate vendors-only XML.")
+                    st.warning("Only Vendors data found (Contacts data is empty/missing). Attempting to generate vendors-only XML.")
                     generated_xmls['tally_contacts_vendors.xml'] = generate_contacts_vendors_xml(None, processed_dfs['vendors'])
                 else:
-                    st.warning("Skipping Contacts/Vendors XML generation due to missing/errored Contacts and Vendors data.")
+                    st.info("Skipping Contacts/Vendors XML generation as both Contacts and Vendors data are empty/missing.")
             except Exception as e:
                 st.error("Error generating Contacts/Vendors XML:")
                 st.exception(e)
 
 
             try:
-                if processed_dfs.get('invoices') is not None:
+                if processed_dfs.get('invoices') is not None and not processed_dfs['invoices'].empty:
                     generated_xmls['tally_sales_vouchers.xml'] = generate_sales_vouchers_xml(processed_dfs['invoices'])
                 else:
-                    st.warning("Skipping Sales Vouchers XML generation due to missing/errored Invoices data.")
+                    st.info("Skipping Sales Vouchers XML generation as Invoices data is empty.")
             except Exception as e:
                 st.error("Error generating Sales Vouchers XML:")
                 st.exception(e)
             
             try:
-                if processed_dfs.get('bills') is not None:
+                if processed_dfs.get('bills') is not None and not processed_dfs['bills'].empty:
                     generated_xmls['tally_purchase_vouchers.xml'] = generate_purchase_vouchers_xml(processed_dfs['bills'])
                 else:
-                    st.warning("Skipping Purchase Vouchers XML generation due to missing/errored Bills data.")
+                    st.info("Skipping Purchase Vouchers XML generation as Bills data is empty.")
             except Exception as e:
                 st.error("Error generating Purchase Vouchers XML:")
                 st.exception(e)
 
             try:
-                if processed_dfs.get('customer_payments') is not None:
+                if processed_dfs.get('customer_payments') is not None and not processed_dfs['customer_payments'].empty:
                     generated_xmls['tally_receipt_vouchers.xml'] = generate_customer_payments_xml(processed_dfs['customer_payments'])
                 else:
-                    st.warning("Skipping Receipt Vouchers XML generation due to missing/errored Customer Payments data.")
+                    st.info("Skipping Receipt Vouchers XML generation as Customer Payments data is empty.")
             except Exception as e:
                 st.error("Error generating Customer Payments XML:")
                 st.exception(e)
 
             try:
-                if processed_dfs.get('vendor_payments') is not None:
+                if processed_dfs.get('vendor_payments') is not None and not processed_dfs['vendor_payments'].empty:
                     generated_xmls['tally_payment_vouchers.xml'] = generate_vendor_payments_xml(processed_dfs['vendor_payments'])
                 else:
-                    st.warning("Skipping Payment Vouchers XML generation due to missing/errored Vendor Payments data.")
+                    st.info("Skipping Payment Vouchers XML generation as Vendor Payments data is empty.")
             except Exception as e:
                 st.error("Error generating Vendor Payments XML:")
                 st.exception(e)
             
             try:
-                if processed_dfs.get('credit_notes') is not None:
+                if processed_dfs.get('credit_notes') is not None and not processed_dfs['credit_notes'].empty:
                     generated_xmls['tally_credit_notes.xml'] = generate_credit_notes_xml(processed_dfs['credit_notes'])
                 else:
-                    st.warning("Skipping Credit Notes XML generation due to missing/errored Credit Notes data.")
+                    st.info("Skipping Credit Notes XML generation as Credit Notes data is empty.")
             except Exception as e:
                 st.error("Error generating Credit Notes XML:")
                 st.exception(e)
 
             try:
-                if processed_dfs.get('journals') is not None:
+                if processed_dfs.get('journals') is not None and not processed_dfs['journals'].empty:
                     generated_xmls['tally_journal_vouchers.xml'] = generate_journal_vouchers_xml(processed_dfs['journals'])
                 else:
-                    st.warning("Skipping Journal Vouchers XML generation due to missing/errored Journals data.")
+                    st.info("Skipping Journal Vouchers XML generation as Journals data is empty.")
             except Exception as e:
                 st.error("Error generating Journal Vouchers XML:")
                 st.exception(e)
