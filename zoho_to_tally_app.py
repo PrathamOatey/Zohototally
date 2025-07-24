@@ -125,7 +125,7 @@ def process_items(df):
     tally_message = etree.Element('TALLYMESSAGE', xmlns_UDF="TallyUDF")
 
     for _, row in df_cleaned.iterrows():
-        item_name = safe_str(row['Name'])
+        item_name = safe_str(row['Item Name'])
         
         # Create Stock Group (assuming 'Item Type' can be a group)
         stock_group_name = safe_str(row.get('Item Type', 'Primary'))
@@ -249,9 +249,9 @@ def process_invoices(df):
         vch = etree.SubElement(tally_message, 'VOUCHER', VCHTYPE="Sales", ACTION="Create")
         
         etree.SubElement(vch, 'DATE').text = safe_str(row['Invoice Date'])
-        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Invoice#'])
-        etree.SubElement(vch, 'REFERENCE').text = safe_str(row['Order Number'])
-        etree.SubElement(vch, 'NARRATION').text = f"Sales against Invoice {safe_str(row['Invoice#'])}. {safe_str(row['Notes'])}"
+        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Invoice Number'])
+        etree.SubElement(vch, 'REFERENCE').text = safe_str(row['PurchaseOrder'])
+        etree.SubElement(vch, 'NARRATION').text = f"Sales against Invoice {safe_str(row['Invoice Number'])}. {safe_str(row['Notes'])}"
         
         # --- Ledger Entries ---
         customer_name = safe_str(row['Customer Name'])
@@ -265,7 +265,7 @@ def process_invoices(df):
 
         # Bill-wise details for the debtor
         bill_alloc = etree.SubElement(debtor_ledger, 'BILLALLOCATIONS.LIST')
-        etree.SubElement(bill_alloc, 'NAME').text = safe_str(row['Invoice#'])
+        etree.SubElement(bill_alloc, 'NAME').text = safe_str(row['Invoice Number'])
         etree.SubElement(bill_alloc, 'BILLTYPE').text = "New Ref"
         etree.SubElement(bill_alloc, 'AMOUNT').text = f"-{total_amount}"
 
@@ -283,19 +283,19 @@ def process_customer_payments(df):
         return None, "Customer Payments data is missing or empty."
 
     df_cleaned = df.copy()
-    df_cleaned = format_date_column(df_cleaned, 'Payment Date')
+    df_cleaned = format_date_column(df_cleaned, 'Date')
 
     tally_message = etree.Element('TALLYMESSAGE', xmlns_UDF="TallyUDF")
 
     for _, row in df_cleaned.iterrows():
         vch = etree.SubElement(tally_message, 'VOUCHER', VCHTYPE="Receipt", ACTION="Create")
         
-        etree.SubElement(vch, 'DATE').text = safe_str(row['Payment Date'])
-        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Payment#'])
-        etree.SubElement(vch, 'NARRATION').text = f"Received from {safe_str(row['Customer Name'])} via {safe_str(row['Payment Mode'])}. Ref: {safe_str(row['Reference#'])}"
+        etree.SubElement(vch, 'DATE').text = safe_str(row['Date'])
+        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Payment Number'])
+        etree.SubElement(vch, 'NARRATION').text = f"Received from {safe_str(row['Customer Name'])} via {safe_str(row['Mode'])}. Ref: {safe_str(row['Reference Number'])}"
         
         customer_name = safe_str(row['Customer Name'])
-        amount_received = float(row['Amount Received'])
+        amount_received = float(row['Amount'])
         
         # 1. Bank/Cash Ledger (Debit) - Assuming payment goes to a default 'Bank' account
         bank_ledger = etree.SubElement(vch, 'ALLLEDGERENTRIES.LIST')
@@ -313,7 +313,7 @@ def process_customer_payments(df):
         bill_alloc = etree.SubElement(customer_ledger, 'BILLALLOCATIONS.LIST')
         # We need the invoice number this payment is against. Assuming it's in a column.
         # This is a critical piece of information. Using Payment# as a placeholder if not found.
-        invoice_ref = safe_str(row.get('Invoice#', row.get('Payment#')))
+        invoice_ref = safe_str(row.get('Invoice Number', row.get('Payment Number')))
         etree.SubElement(bill_alloc, 'NAME').text = invoice_ref
         etree.SubElement(bill_alloc, 'BILLTYPE').text = "Agst Ref"
         etree.SubElement(bill_alloc, 'AMOUNT').text = str(amount_received)
@@ -335,8 +335,8 @@ def process_bills(df):
         vch = etree.SubElement(tally_message, 'VOUCHER', VCHTYPE="Purchase", ACTION="Create")
         
         etree.SubElement(vch, 'DATE').text = safe_str(row['Bill Date'])
-        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Bill#'])
-        etree.SubElement(vch, 'NARRATION').text = f"Purchase from {safe_str(row['Vendor Name'])}. Ref: {safe_str(row['Order Number'])}"
+        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Bill Number'])
+        etree.SubElement(vch, 'NARRATION').text = f"Purchase from {safe_str(row['Vendor Name'])}. Ref: {safe_str(row['PurchaseOrder'])}"
 
         vendor_name = safe_str(row['Vendor Name'])
         total_amount = float(row['Total'])
@@ -349,7 +349,7 @@ def process_bills(df):
 
         # Bill-wise details for the vendor
         bill_alloc = etree.SubElement(vendor_ledger, 'BILLALLOCATIONS.LIST')
-        etree.SubElement(bill_alloc, 'NAME').text = safe_str(row['Bill#'])
+        etree.SubElement(bill_alloc, 'NAME').text = safe_str(row['Bill Number'])
         etree.SubElement(bill_alloc, 'BILLTYPE').text = "New Ref"
         etree.SubElement(bill_alloc, 'AMOUNT').text = str(total_amount)
 
@@ -367,16 +367,16 @@ def process_vendor_payments(df):
         return None, "Vendor Payments data is missing or empty."
 
     df_cleaned = df.copy()
-    df_cleaned = format_date_column(df_cleaned, 'Payment Date')
+    df_cleaned = format_date_column(df_cleaned, 'Date')
 
     tally_message = etree.Element('TALLYMESSAGE', xmlns_UDF="TallyUDF")
 
     for _, row in df_cleaned.iterrows():
         vch = etree.SubElement(tally_message, 'VOUCHER', VCHTYPE="Payment", ACTION="Create")
         
-        etree.SubElement(vch, 'DATE').text = safe_str(row['Payment Date'])
-        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Payment#'])
-        etree.SubElement(vch, 'NARRATION').text = f"Paid to {safe_str(row['Vendor Name'])} via {safe_str(row['Payment Mode'])}. Ref: {safe_str(row['Reference#'])}"
+        etree.SubElement(vch, 'DATE').text = safe_str(row['Date'])
+        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Payment Number'])
+        etree.SubElement(vch, 'NARRATION').text = f"Paid to {safe_str(row['Vendor Name'])} via {safe_str(row['Mode'])}. Ref: {safe_str(row['Reference Number'])}"
         
         vendor_name = safe_str(row['Vendor Name'])
         amount_paid = float(row['Amount'])
@@ -390,7 +390,7 @@ def process_vendor_payments(df):
         # Bill-wise details for knocking off the bill
         bill_alloc = etree.SubElement(vendor_ledger, 'BILLALLOCATIONS.LIST')
         # This is a critical piece of info. Assuming it's available.
-        bill_ref = safe_str(row.get('Bill#', row.get('Payment#'))) 
+        bill_ref = safe_str(row.get('Bill Number', row.get('Payment Number'))) 
         etree.SubElement(bill_alloc, 'NAME').text = bill_ref
         etree.SubElement(bill_alloc, 'BILLTYPE').text = "Agst Ref"
         etree.SubElement(bill_alloc, 'AMOUNT').text = f"-{amount_paid}"
@@ -418,7 +418,7 @@ def process_credit_notes(df):
         vch = etree.SubElement(tally_message, 'VOUCHER', VCHTYPE="Credit Note", ACTION="Create")
         
         etree.SubElement(vch, 'DATE').text = safe_str(row['Credit Note Date'])
-        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Credit Note#'])
+        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Credit Note Number'])
         etree.SubElement(vch, 'NARRATION').text = f"Credit note for {safe_str(row['Customer Name'])}. Reason: {safe_str(row['Reason'])}"
         
         customer_name = safe_str(row['Customer Name'])
@@ -440,7 +440,7 @@ def process_credit_notes(df):
         # Bill-wise details
         bill_alloc = etree.SubElement(customer_ledger, 'BILLALLOCATIONS.LIST')
         # Usually against an existing invoice, or as a new credit
-        etree.SubElement(bill_alloc, 'NAME').text = safe_str(row['Credit Note#'])
+        etree.SubElement(bill_alloc, 'NAME').text = safe_str(row['Credit Note Number'])
         etree.SubElement(bill_alloc, 'BILLTYPE').text = "Agst Ref" # Or New Ref if it's a fresh credit
         etree.SubElement(bill_alloc, 'AMOUNT').text = str(total_amount)
 
@@ -452,31 +452,43 @@ def process_journals(df):
         return None, "Journals data is missing or empty."
 
     df_cleaned = df.copy()
+    # Replace NaN with 0 in debit/credit columns to avoid errors
+    df_cleaned['Debits'] = pd.to_numeric(df_cleaned['Debits'], errors='coerce').fillna(0)
+    df_cleaned['Credits'] = pd.to_numeric(df_cleaned['Credits'], errors='coerce').fillna(0)
+    
     df_cleaned = format_date_column(df_cleaned, 'Journal Date')
 
     tally_message = etree.Element('TALLYMESSAGE', xmlns_UDF="TallyUDF")
     
-    # Group by Journal ID to process each journal entry as one voucher
-    for journal_id, group in df_cleaned.groupby('Journal ID'):
+    # Group by Journal Number to process each journal entry as one voucher
+    for journal_id, group in df_cleaned.groupby('Journal Number'):
+        if group.empty:
+            continue
+            
         first_row = group.iloc[0]
         vch = etree.SubElement(tally_message, 'VOUCHER', VCHTYPE="Journal", ACTION="Create")
         
         etree.SubElement(vch, 'DATE').text = safe_str(first_row['Journal Date'])
-        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(first_row['Journal#'])
+        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(first_row['Journal Number'])
         etree.SubElement(vch, 'NARRATION').text = safe_str(first_row['Notes'])
 
         for _, row in group.iterrows():
-            # Debit Entry
-            debit_ledger = etree.SubElement(vch, 'ALLLEDGERENTRIES.LIST')
-            etree.SubElement(debit_ledger, 'LEDGERNAME').text = safe_str(row['Account'])
-            etree.SubElement(debit_ledger, 'ISDEEMEDPOSITIVE').text = "Yes" # Debit
-            etree.SubElement(debit_ledger, 'AMOUNT').text = f"-{safe_str(row['Debits'])}"
+            debit_amount = row['Debits']
+            credit_amount = row['Credits']
+
+            if debit_amount > 0:
+                # This is a Debit Entry
+                ledger_entry = etree.SubElement(vch, 'ALLLEDGERENTRIES.LIST')
+                etree.SubElement(ledger_entry, 'LEDGERNAME').text = safe_str(row['Account'])
+                etree.SubElement(ledger_entry, 'ISDEEMEDPOSITIVE').text = "Yes"
+                etree.SubElement(ledger_entry, 'AMOUNT').text = f"-{debit_amount}"
             
-            # Credit Entry
-            credit_ledger = etree.SubElement(vch, 'ALLLEDGERENTRIES.LIST')
-            etree.SubElement(credit_ledger, 'LEDGERNAME').text = safe_str(row['Account'])
-            etree.SubElement(credit_ledger, 'ISDEEMEDPOSITIVE').text = "No" # Credit
-            etree.SubElement(credit_ledger, 'AMOUNT').text = safe_str(row['Credits'])
+            if credit_amount > 0:
+                # This is a Credit Entry
+                ledger_entry = etree.SubElement(vch, 'ALLLEDGERENTRIES.LIST')
+                etree.SubElement(ledger_entry, 'LEDGERNAME').text = safe_str(row['Account'])
+                etree.SubElement(ledger_entry, 'ISDEEMEDPOSITIVE').text = "No"
+                etree.SubElement(ledger_entry, 'AMOUNT').text = str(credit_amount)
 
     return tally_message, None
 
@@ -607,8 +619,8 @@ if uploaded_zip is not None:
                 except Exception as e:
                     st.error(f"  - ❌ An error occurred during {key} processing: {e}")
                     # In-depth traceback for debugging
-                    # import traceback
-                    # st.code(traceback.format_exc())
+                    import traceback
+                    st.code(traceback.format_exc())
 
         # --- XML File Generation and Download ---
         st.subheader("4. Download Your Tally XML Files")
@@ -618,7 +630,11 @@ if uploaded_zip is not None:
         output_zip_path = os.path.join(temp_dir, "tally_import_files.zip")
 
         with zipfile.ZipFile(output_zip_path, 'w') as zf:
-            for i, (key, xml_tree) in enumerate(processed_dfs.items()):
+            # Sort the processed files to ensure masters are written before vouchers
+            sorted_keys = sorted(processed_dfs.keys(), key=lambda x: list(processing_pipeline.keys()).index(x))
+            
+            for i, key in enumerate(sorted_keys):
+                xml_tree = processed_dfs[key]
                 # Create the full XML structure
                 envelope = etree.Element('ENVELOPE')
                 header = etree.SubElement(envelope, 'HEADER')
@@ -671,7 +687,7 @@ This is a **critical** part of the process. Do not skip it.
     * `Enable Bill-wise entry` under Accounting Features.
     * `Maintain stock categories` and `Maintain batch-wise details` if needed under Inventory Features.
     * Enable Goods & Services Tax (GST) and enter your company's GSTIN and other details if applicable.
-* **Base Ledgers:** Ensure that default ledgers like 'Sales', 'Purchase', 'Bank', 'Cash', 'CGST', 'SGST', 'IGST' (if applicable) exist in your Tally company. This script assumes they do. For example, `Output CGST`, `Output SGST`, `Output IGST`, `Input CGST`, `Input SGST`, `Input IGST` ledgers exist in Tally and are configured correctly as 'Duties & Taxes' with the appropriate GST types and percentages.
+* **Base Ledgers:** Ensure that default ledgers like 'Sales', 'Purchase', 'Bank', 'Cash', 'CGST', 'SGST', 'IGST' (if applicable) exist in your Tally company. This script assumes they do. For example, `Output CGST`, `Output SGST`, `Output IGST`, 'Input CGST', `Input SGST`, `Input IGST` ledgers exist in Tally and are configured correctly as 'Duties & Taxes' with the appropriate GST types and percentages.
 
 ---
 
