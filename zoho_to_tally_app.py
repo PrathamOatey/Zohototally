@@ -34,7 +34,7 @@ BASE_CURRENCY_SYMBOL = "₹"
 BASE_CURRENCY_NAME = "Rupees"
 DEFAULT_COUNTRY = "India" # Assuming default country for addresses
 
-# --- Helper Functions ---
+# --- Helper Functions (Defined First) ---
 
 def safe_str(value):
     """
@@ -91,17 +91,6 @@ def create_tally_envelope(report_name="All Masters", request_xml_tags="ACCOUNTS"
     tally_message = etree.SubElement(request_data, "TALLYMESSAGE")
     return envelope, tally_message
 
-# --- Data Cleaning and Mapping Functions (from 02_clean_map.py) ---
-
-def format_date_column(df, column_name):
-    """Converts a column to datetime objects and then formats as 'YYYY-MM-DD' string."""
-    if column_name in df.columns:
-        # Attempt to convert to datetime, coercing errors
-        df[column_name] = pd.to_datetime(df[column_name], errors='coerce')
-        # Format valid dates, set invalid/NaT dates to empty string
-        df[column_name] = df[column_name].dt.strftime('%Y-%m-%d').fillna('')
-    return df
-
 def clean_numeric_column(df, column_name):
     """
     Converts a column to numeric, handling common non-numeric characters,
@@ -157,6 +146,8 @@ def extract_numeric_from_tax_string(value):
         return float(numbers[0]) # Take the first number found
     return 0.0
 
+
+# --- Data Cleaning and Mapping Functions (Defined Second) ---
 
 def process_chart_of_accounts(df):
     st.info("Processing Chart of Accounts...")
@@ -440,45 +431,709 @@ def process_customer_payments(df):
     st.info("Processing Customer Payments...")
     if df is None: return None
 
-    envelope, tally_message = create_tally_envelope("Vouchers", "VOUCHERS")
+    df_cleaned = df.copy() # Correctly use df_cleaned as local variable for iteration
+    df_cleaned = format_date_column(df_cleaned, 'Date')
+    df_cleaned = format_date_column(df_cleaned, 'Created Time')
+    df_cleaned = format_date_column(df_cleaned, 'Invoice Date')
+    df_cleaned = format_date_column(df_cleaned, 'Invoice Payment Applied Date')
 
-    for index, row in df_payments.iterrows():
-        payment_id = safe_str(row.get('CustomerPayment ID', ''))
-        if not payment_id:
-            st.warning(f"Skipping customer payment due to empty ID: Row {index+2}")
+    numeric_cols = [
+        'Amount', 'Unused Amount', 'Bank Charges', 'Exchange Rate',
+        'Tax Percentage', 'Amount Applied to Invoice', 'Withholding Tax Amount'
+    ]
+    for col in numeric_cols:
+        if col in df_cleaned.columns:
+            df_cleaned = clean_numeric_column(df_cleaned, col)
+
+    string_cols = [
+        'Payment Number', 'CustomerPayment ID', 'Mode', 'CustomerID', 'Description', 'Currency Code', 'Branch ID',
+        'Payment Number Prefix', 'Payment Number Suffix', 'Customer Name',
+        'Place of Supply', 'Place of Supply(With State Code)', 'GST Treatment',
+        'GST Identification Number (GSTIN)', 'Description of Supply', 'Tax Name',
+        'Tax Type', 'Payment Type', 'Location Name', 'Deposit To',
+        'Deposit To Account Code', 'Tax Account', 'InvoicePayment ID', 'Invoice Number'
+    ]
+    for col in string_cols:
+        if col in df_cleaned.columns:
+            df_cleaned[col] = df_cleaned[col].fillna('').astype(str)
+
+    df_cleaned['Tally_Deposit_Ledger'] = df_cleaned['Deposit To'].apply(
+        lambda x: x if x else 'Cash-in-Hand'
+    ) if 'Deposit To' in df_cleaned.columns else 'Cash-in-Hand'
+    
+    if 'CustomerID' in df_cleaned.columns:
+        df_cleaned['CustomerID'] = df_cleaned['CustomerID'].fillna('').astype(str)
+
+    st.success(f"Processed {len(df_cleaned)} Customer Payments entries.")
+    return df_cleaned
+
+def process_vendor_payments(df):
+    st.info("Processing Vendor Payments...")
+    if df is None: return None
+
+    df_cleaned = df.copy() # Correctly use df_cleaned as local variable for iteration
+    df_cleaned = format_date_column(df_cleaned, 'Date')
+    df_cleaned = format_date_column(df_cleaned, 'Bill Date')
+    df_cleaned = format_date_column(df_cleaned, 'Bill Payment Applied Date')
+
+    numeric_cols = [
+        'Amount', 'Unused Amount', 'TDSAmount', 'Exchange Rate', 'ReverseCharge Tax Percentage',
+        'ReverseCharge Tax Amount', 'TDS Percentage', 'Bill Amount', 'Withholding Tax Amount',
+        'Withholding Tax Amount (BCY)'
+    ]
+    for col in numeric_cols:
+        if col in df_cleaned.columns:
+            df_cleaned = clean_numeric_column(df_cleaned, col)
+
+    string_cols = [
+        'Payment Number', 'Payment Number Prefix', 'Payment Number Suffix', 'VendorPayment ID',
+        'Mode', 'Description', 'Reference Number', 'Currency Code', 'Branch ID',
+        'Payment Status', 'Payment Type', 'Location Name', 'Vendor Name',
+        'Debit A/c no', 'Vendor Bank Account Number', 'Vendor Bank Name',
+        'Vendor Bank Code', 'Source of Supply', 'Destination of Supply',
+        'GST Treatment', 'GST Identification Number (GSTIN)', 'EmailID',
+        'Description of Supply', 'Paid Through', 'Paid Through Account Code',
+        'Tax Account', 'ReverseCharge Tax Type', 'ReverseCharge Tax Name',
+        'TDS Name', 'TDS Section Code', 'TDS Section', 'TDS Account Name',
+        'Bank Reference Number', 'PIPayment ID', 'Bill Number', 'Withholding Tax Amount (BCY)'
+    ]
+    for col in string_cols:
+        if col in df_cleaned.columns:
+            df_cleaned[col] = df_cleaned[col].fillna('').astype(str)
+
+    df_cleaned['Tally_Paid_Through_Ledger'] = df_cleaned['Paid Through'].apply(
+        lambda x: x if x else 'Cash-in-Hand'
+    ) if 'Paid Through' in df_cleaned.columns else 'Cash-in-Hand'
+    st.success(f"Processed {len(df_cleaned)} Vendor Payments entries.")
+    return df_cleaned
+
+def process_credit_notes(df):
+    st.info("Processing Credit Notes...")
+    if df is None: return None
+
+    df_cleaned = df.copy() # Correctly use df_cleaned as local variable for iteration
+    df_cleaned = format_date_column(df_cleaned, 'Credit Note Date')
+    df_cleaned = format_date_column(df_cleaned, 'Associated Invoice Date')
+
+    numeric_cols = [
+        'Exchange Rate', 'Total', 'Balance', 'Entity Discount Percent',
+        'Shipping Charge', 'Shipping Charge Tax Amount', 'Shipping Charge Tax %',
+        'Adjustment', 'TCS Amount', 'TDS Amount', 'TDS Percentage',
+        'Discount', 'Discount Amount', 'Quantity', 'Item Tax Amount', 'Item Total',
+        'CGST', 'SGST', 'IGST', 'CESS', # Amounts
+        'Reverse Charge Tax Rate', 'Item Tax %', 'TCS Percentage', 'Round Off',
+        'Entity Discount Amount', 'Item Price'
+    ]
+    for col in numeric_cols:
+        if col in df_cleaned.columns:
+            df_cleaned = clean_numeric_column(df_cleaned, col)
+    
+    # Specific cleaning for tax *rate* columns that might have text like 'CGST 18%' or 'IGST12'
+    for col in ['CGST Rate %', 'SGST Rate %', 'IGST Rate %', 'CESS Rate %']:
+        if col in df_cleaned.columns:
+            df_cleaned[col] = df_cleaned[col].apply(extract_numeric_from_tax_string) # Use new helper
+            df_cleaned = clean_numeric_column(df_cleaned, col) # Ensure it's numeric after extraction
+
+
+    string_cols = [
+        'Product ID', 'CreditNotes ID', 'Credit Note Number', 'Credit Note Status', 'Customer Name',
+        'Billing Attention', 'Billing Address', 'Billing Street 2', 'Billing City',
+        'Billing State', 'Billing Country', 'Billing Code', 'Billing Phone', 'Billing Fax',
+        'Shipping Attention', 'Shipping Address', 'Shipping Street 2', 'Shipping City',
+        'Shipping State', 'Shipping Country', 'Shipping Phone', 'Shipping Code', 'Shipping Fax',
+        'Customer ID', 'Currency Code', 'Notes', 'Terms & Conditions', 'Reference#', 'Shipping Charge Tax ID',
+        'Shipping Charge Tax Name', 'Shipping Charge Tax Type', 'Shipping Charge Tax Exemption Code',
+        'Shipping Charge SAC Code', 'Branch ID', 'Associated Invoice Number', 'TDS Name',
+        'TDS Section Code', 'TDS Section', 'E-WayBill Number', 'E-WayBill Status',
+        'Transporter Name', 'Transporter ID', 'Is Discount Before Tax', 'Item Name', 'Item Desc', 'Usage unit',
+        'Location Name', 'Reason', 'Project ID', 'Project Name', 'Supplier Org Name',
+        'Supplier GST Registration Number', 'Supplier Street Address', 'Supplier City',
+        'Supplier State', 'Supplier Country', 'Supplier ZipCode', 'Supplier Phone',
+        'Supplier E-Mail', 'Supply Type', 'Tax1 ID', 'Item Tax Type', 'Reverse Charge Tax Name',
+        'Reverse Charge Tax Type', 'Place of Supply(With State Code)', 'GST Treatment',
+        'GST Identification Number (GSTIN)', 'TCS Tax Name', 'Nature Of Collection',
+        'Sales person', 'Discount Type', 'Place of Supply', 'Adjustment Description',
+        'Subject', 'Reference Invoice Type', 'Item Type', 'Template Name', 'HSN/SAC',
+        'Account', 'Account Code', 'SKU', 'Item Tax Exemption Reason', 'Line Item Location Name',
+        'Kit Combo Item Name'
+    ]
+    for col in string_cols:
+        if col in df_cleaned.columns:
+            df_cleaned[col] = df_cleaned[col].fillna('').astype(str)
+
+    # Simplified to a fixed Sales Returns Account, relying on mandatory ledgers
+    df_cleaned['Tally_Sales_Return_Ledger'] = 'Sales Returns'
+    df_cleaned['Tally_Output_CGST_Ledger'] = 'Output CGST'
+    df_cleaned['Tally_Output_SGST_Ledger'] = 'Output SGST'
+    df_cleaned['Tally_Output_IGST_Ledger'] = 'Output IGST'
+    
+    if 'Customer ID' in df_cleaned.columns:
+        df_cleaned['Customer ID'] = df_cleaned['Customer ID'].fillna('').astype(str)
+
+    st.success(f"Processed {len(df_cleaned)} Credit Notes entries.")
+    return df_cleaned
+
+def process_journals(df):
+    st.info("Processing Journals...")
+    if df is None: return None
+
+    df_cleaned = df.copy() # Correctly use df_cleaned as local variable for iteration
+    df_cleaned = format_date_column(df_cleaned, 'Journal Date')
+
+    numeric_cols = [
+        'Exchange Rate', 'Tax Percentage', 'Tax Amount', 'Debit', 'Credit', 'Total'
+    ]
+    for col in numeric_cols:
+        if col in df_cleaned.columns:
+            df_cleaned = clean_numeric_column(df_cleaned, col)
+
+    string_cols = [
+        'Journal Number', 'Journal Number Prefix', 'Journal Number Suffix',
+        'Journal Created By', 'Journal Type', 'Status', 'Journal Entity Type',
+        'Reference Number', 'Notes', 'Is Inclusive Tax', 'Location ID', 'Location Name', 'Item Order',
+        'Tax Name', 'Tax Type', 'Project Name', 'Account', 'Account Code',
+        'Contact Name', 'Currency', 'Description'
+    ]
+    for col in string_cols:
+        if col in df_cleaned.columns:
+            df_cleaned[col] = df_cleaned[col].fillna('').astype(str)
+
+    st.success(f"Processed {len(df_cleaned)} Journal entries.")
+    return df_cleaned
+
+def process_bills(df):
+    st.info("Processing Bills...")
+    if df is None: return None
+
+    df_cleaned = df.copy() # Correctly use df_cleaned as local variable for iteration
+    df_cleaned = format_date_column(df_cleaned, 'Bill Date')
+    df_cleaned = format_date_column(df_cleaned, 'Due Date')
+    df_cleaned = format_date_column(df_cleaned, 'Submitted Date')
+    df_cleaned = format_date_column(df_cleaned, 'Approved Date')
+
+    numeric_cols = [
+        'Entity Discount Percent', 'Exchange Rate', 'SubTotal', 'Total', 'Balance',
+        'TCS Amount', 'Adjustment', 'Quantity', 'Usage unit', 'Tax Amount',
+        'Item Total', 'TDS Percentage', 'TCS Percentage', 'Rate', 'Discount',
+        'Discount Amount', 'CGST', 'SGST', 'IGST', 'CESS' # Amounts
+    ]
+    for col in numeric_cols:
+        if col in df_cleaned.columns:
+            df_cleaned = clean_numeric_column(df_cleaned, col)
+
+    # Specific cleaning for tax *rate* columns that might have text like 'CGST 18%' or 'IGST12'
+    for col in ['CGST Rate %', 'SGST Rate %', 'IGST Rate %', 'CESS Rate %']:
+        if col in df_cleaned.columns:
+            df_cleaned[col] = df_cleaned[col].apply(extract_numeric_from_tax_string) # Use new helper
+            df_cleaned = clean_numeric_column(df_cleaned, col) # Ensure it's numeric after extraction
+
+    string_cols = [
+        'Bill Date', 'Due Date', 'Bill ID', 'Vendor Name', 'Entity Discount Percent',
+        'Payment Terms', 'Payment Terms Label', 'Bill Number', 'PurchaseOrder',
+        'Currency Code', 'Exchange Rate', 'SubTotal', 'Total', 'Balance', 'TCS Amount',
+        'Vendor Notes', 'Terms & Conditions', 'Adjustment', 'Adjustment Description',
+        'Branch ID', 'Branch Name', 'Location Name', 'Is Inclusive Tax', 'Submitted By',
+        'Approved By', 'Submitted Date', 'Approved Date', 'Bill Status', 'Created By',
+        'Product ID', 'Item Name', 'Account', 'Account Code', 'Description', 'Quantity',
+        'Usage unit', 'Tax Amount', 'Item Total', 'Is Billable', 'Reference Invoice Type',
+        'Source of Supply', 'Destination of Supply', 'GST Treatment',
+        'GST Identification Number (GSTIN)', 'TDS Calculation Type', 'TDS TaxID',
+        'TDS Name', 'TDS Percentage', 'TDS Section Code', 'TDS Section', 'TDS Amount',
+        'TCS Tax Name', 'TCS Percentage', 'Nature Of Collection', 'SKU',
+        'Line Item Location Name', 'Rate', 'Discount Type', 'Is Discount Before Tax',
+        'Discount', 'Discount Amount', 'HSN/SAC', 'Purchase Order Number', 'Tax ID',
+        'Tax Name', 'Tax Percentage', 'Tax Type', 'Item TDS Name', 'Item TDS Percentage',
+        'Item TDS Amount', 'Item TDS Section Code', 'Item TDS Section',
+        'Item Exemption Code', 'Item Type', 'Reverse Charge Tax Name',
+        'Reverse Charge Tax Rate', 'Reverse Charge Tax Type', 'Supply Type',
+        'ITC Eligibility', 'Entity Discount Amount', 'Discount Account',
+        'Discount Account Code', 'Is Landed Cost', 'Customer Name', 'Project Name'
+    ]
+    for col in string_cols:
+        if col in df_cleaned.columns:
+            df_cleaned[col] = df_cleaned[col].fillna('').astype(str)
+
+    # Simplified to a fixed Purchase Account as per standard Tally practice, and relying on mandatory ledgers
+    df_cleaned['Tally_Purchase_Ledger_Name'] = 'Purchase Account'
+    df_cleaned['Tally_Input_CGST_Ledger'] = 'Input CGST'
+    df_cleaned['Tally_Input_SGST_Ledger'] = 'Input SGST'
+    df_cleaned['Tally_Input_IGST_Ledger'] = 'Input IGST'
+    df_cleaned['Tally_Round_Off_Ledger'] = 'Round Off'
+
+    st.success(f"Processed {len(df_cleaned)} Bills entries.")
+    return df_cleaned
+
+# --- XML Generation Functions (Defined Third) ---
+
+def generate_ledgers_xml(df_coa):
+    st.info("Generating Ledgers XML...")
+    if df_coa is None: return None
+
+    envelope, tally_message = create_tally_envelope("All Masters", "ACCOUNTS")
+
+    known_tally_primary_groups = [
+        'Capital Account', 'Loans (Liability)', 'Fixed Assets', 'Investments',
+        'Current Assets', 'Current Liabilities', 'Suspense A/c',
+        'Sales Accounts', 'Purchase Accounts', 'Direct Incomes', 'Direct Expenses',
+        'Indirect Incomes', 'Indirect Expenses', 'Bank Accounts', 'Cash-in-Hand',
+        'Duties & Taxes', 'Stock-in-Hand', 'Branch / Divisions', 'Reserves & Surplus',
+        'Secured Loans', 'Unsecured Loans', 'Provisions', 'Loans & Advances (Asset)'
+    ]
+
+    tally_groups_to_create = df_coa['Tally_Parent_Group'].unique().tolist()
+    for group_name in sorted(tally_groups_to_create):
+        if not group_name or group_name == 'Suspense A/c':
             continue
 
-        amount = row.get('Amount', 0.0)
+        parent_group_for_new_group = "Primary" if group_name not in known_tally_primary_groups else ""
+
+        group_xml = etree.SubElement(tally_message, "GROUP", NAME=safe_str(group_name), ACTION="CREATE")
+        etree.SubElement(group_xml, "NAME").text = safe_str(group_name)
+        if parent_group_for_new_group:
+            etree.SubElement(group_xml, "PARENT").text = parent_group_for_new_group
+        etree.SubElement(group_xml, "ISADDABLE").text = "Yes"
+        etree.SubElement(group_xml, "LANGUAGENAME.LIST").append(
+            etree.fromstring(f"<NAME.LIST><NAME>{safe_str(group_name)}</NAME></NAME.LIST>")
+        )
+
+    # Define mandatory ledgers that should always exist in Tally,
+    # mapping to a sensible Tally Parent Group.
+    # THESE NAMES MUST EXACTLY MATCH WHAT YOUR TALLY VOUCHERS WILL USE.
+    mandatory_tally_ledgers_data = [
+        {'Tally_Ledger_Name': 'Sales Account', 'Tally_Parent_Group': 'Sales Accounts', 'Account Type': 'Income', 'Opening Balance': 0.0},
+        {'Tally_Ledger_Name': 'Sales Returns', 'Tally_Parent_Group': 'Sales Accounts', 'Account Type': 'Income', 'Opening Balance': 0.0}, # For Credit Notes
+        {'Tally_Ledger_Name': 'Purchase Account', 'Tally_Parent_Group': 'Purchase Accounts', 'Account Type': 'Expense', 'Opening Balance': 0.0},
+        {'Tally_Ledger_Name': 'Round Off', 'Tally_Parent_Group': 'Indirect Expenses', 'Account Type': 'Expense', 'Opening Balance': 0.0}, # Can be Indirect Incomes/Expenses
+        {'Tally_Ledger_Name': 'Output CGST', 'Tally_Parent_Group': 'Duties & Taxes', 'Account Type': 'Duties & Taxes', 'Opening Balance': 0.0},
+        {'Tally_Ledger_Name': 'Output SGST', 'Tally_Parent_Group': 'Duties & Taxes', 'Account Type': 'Duties & Taxes', 'Opening Balance': 0.0},
+        {'Tally_Ledger_Name': 'Output IGST', 'Tally_Parent_Group': 'Duties & Taxes', 'Account Type': 'Duties & Taxes', 'Opening Balance': 0.0},
+        {'Tally_Ledger_Name': 'Input CGST', 'Tally_Parent_Group': 'Duties & Taxes', 'Account Type': 'Duties & Taxes', 'Opening Balance': 0.0},
+        {'Tally_Ledger_Name': 'Input SGST', 'Tally_Parent_Group': 'Duties & Taxes', 'Account Type': 'Duties & Taxes', 'Opening Balance': 0.0},
+        {'Tally_Ledger_Name': 'Input IGST', 'Tally_Parent_Group': 'Duties & Taxes', 'Account Type': 'Duties & Taxes', 'Opening Balance': 0.0},
+        {'Tally_Ledger_Name': 'Cash-in-Hand', 'Tally_Parent_Group': 'Cash-in-Hand', 'Account Type': 'Cash', 'Opening Balance': 0.0},
+        {'Tally_Ledger_Name': 'Transportation Expense', 'Tally_Parent_Group': 'Indirect Expenses', 'Account Type': 'Expense', 'Opening Balance': 0.0}, # From Journal error
+        # Add other common ledgers as needed for your specific Tally setup if they are not in your Zoho COA
+        # Example: {'Tally_Ledger_Name': 'Bank Account', 'Tally_Parent_Group': 'Bank Accounts', 'Account Type': 'Bank', 'Opening Balance': 0.0},
+    ]
+
+    # Convert mandatory ledgers to a DataFrame
+    df_mandatory_ledgers = pd.DataFrame(mandatory_tally_ledgers_data)
+    # Ensure mandatory ledgers have all columns expected by generate_ledgers_xml loop
+    for col in ['Account ID', 'Tally_Account_Code', 'Tally_Description', 'Tally_Status', 'Currency', 'Parent Account']:
+        if col not in df_mandatory_ledgers.columns:
+            df_mandatory_ledgers[col] = pd.NA # Or other suitable default like ''
+
+    # Combine df_coa with mandatory ledgers, creating unique ledgers.
+    # Prioritize Zoho COA entries if names conflict (keep='first' ensures df_coa entry wins)
+    combined_df_coa = pd.concat([df_coa, df_mandatory_ledgers]).drop_duplicates(subset=['Tally_Ledger_Name'], keep='first')
+    
+    # Process Ledgers from the combined DataFrame
+    for index, row in combined_df_coa.iterrows():
+        ledger_name = safe_str(row['Tally_Ledger_Name'])
+        if not ledger_name:
+            st.warning(f"Skipping ledger due to empty name in Chart of Accounts: Row {index+2}")
+            continue
+
+        parent_group = safe_str(row['Tally_Parent_Group'])
+        if not parent_group:
+            st.warning(f"Ledger '{ledger_name}' has no mapped parent group. Assigning to 'Suspense A/c'.")
+            parent_group = 'Suspense A/c'
+
+        ledger_xml = etree.SubElement(tally_message, "LEDGER", NAME=ledger_name, ACTION="CREATE")
+        etree.SubElement(ledger_xml, "NAME").text = ledger_name
+        etree.SubElement(ledger_xml, "PARENT").text = parent_group
+        
+        if 'Opening Balance' in row.index: # Check in row.index because it might be a synthetic row from mandatory_tally_ledgers_data
+            etree.SubElement(ledger_xml, "OPENINGBALANCE").text = format_tally_amount(row.get('Opening Balance', 0.0))
+        else:
+            etree.SubElement(ledger_xml, "OPENINGBALANCE").text = "0.00" 
+            
+        etree.SubElement(ledger_xml, "CURRENCYID").text = BASE_CURRENCY_NAME
+
+        # Use .get() for Account Type as well, as it might be from mandatory_tally_ledgers_data
+        if safe_str(row.get('Account Type')) == 'Bank':
+            etree.SubElement(ledger_xml, "ISBILLWISEON").text = "No"
+            etree.SubElement(ledger_xml, "ISCASHLEDGER").text = "No"
+            etree.SubElement(ledger_xml, "ISBANKLEDGER").text = "Yes"
+        elif safe_str(row.get('Account Type')) == 'Cash':
+            etree.SubElement(ledger_xml, "ISBILLWISEON").text = "No"
+            etree.SubElement(ledger_xml, "ISCASHLEDGER").text = "Yes"
+            etree.SubElement(ledger_xml, "ISBANKLEDGER").text = "No"
+        elif parent_group in ['Sundry Debtors', 'Sundry Creditors']:
+            etree.SubElement(ledger_xml, "ISBILLWISEON").text = "Yes"
+            etree.SubElement(ledger_xml, "ISCOSTCENTRESON").text = "No"
+
+        description = safe_str(row.get('Tally_Description'))
+        if description:
+            etree.SubElement(ledger_xml, "DESCRIPTION").text = description
+
+        etree.SubElement(ledger_xml, "LANGUAGENAME.LIST").append(
+            etree.fromstring(f"<NAME.LIST><NAME>{safe_str(ledger_name)}</NAME></NAME.LIST>")
+        )
+    xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
+    st.success("Generated Ledgers XML.")
+    return xml_string
+
+def generate_contacts_vendors_xml(df_contacts, df_vendors):
+    st.info("Generating Contacts and Vendors XML...")
+    envelope, tally_message = create_tally_envelope("All Masters", "ACCOUNTS")
+
+    def add_address_details_to_party_xml(parent_element, row, is_shipping=False):
+        prefix = "Shipping" if is_shipping else "Billing"
+        
+        # Fetch values using .get() with default empty string
+        address1 = safe_str(row.get(f'Tally_{prefix}_Address_Line1', ''))
+        address2 = safe_str(row.get(f'Tally_{prefix}_Address_Line2', ''))
+        city = safe_str(row.get(f'{prefix} City', ''))
+        state = safe_str(row.get(f'{prefix} State', ''))
+        country = safe_str(row.get(f'{prefix} Country', '')) or DEFAULT_COUNTRY
+        pincode = safe_str(row.get(f'{prefix} Code', ''))
+
+        address_list = etree.SubElement(parent_element, "ADDRESS.LIST") # Always create the list element
+        
+        # Only add address lines if they have content
+        if address1:
+            etree.SubElement(address_list, "ADDRESS").text = address1
+        if address2:
+            etree.SubElement(address_list, "ADDRESS").text = address2
+        
+        # Only add city/state/country/pincode if they have values to avoid empty tags or issues
+        if city:
+            etree.SubElement(parent_element, "CITY").text = city
+        if state:
+            etree.SubElement(parent_element, "STATENAME").text = state
+        if country:
+            etree.SubElement(parent_element, "COUNTRYNAME").text = country
+        if pincode:
+            etree.SubElement(parent_element, "PINCODE").text = pincode
+
+
+    if df_contacts is not None:
+        for index, row in df_contacts.iterrows():
+            party_name = safe_str(row.get('Tally_Party_Name', ''))
+            if not party_name:
+                st.warning(f"Skipping contact due to empty name: Row {index+2}")
+                continue
+
+            ledger_xml = etree.SubElement(tally_message, "LEDGER", NAME=party_name, ACTION="CREATE")
+            etree.SubElement(ledger_xml, "NAME").text = party_name
+            etree.SubElement(ledger_xml, "PARENT").text = "Sundry Debtors"
+            etree.SubElement(ledger_xml, "ISBILLWISEON").text = "Yes"
+            etree.SubElement(ledger_xml, "OPENINGBALANCE").text = format_tally_amount(row.get('Opening Balance', 0.0))
+
+            add_address_details_to_party_xml(ledger_xml, row, is_shipping=False)
+
+            phone = safe_str(row.get('Tally_Phone'))
+            mobile = safe_str(row.get('Tally_Mobile'))
+            email = safe_str(row.get('Tally_Email'))
+
+            if phone: etree.SubElement(ledger_xml, "PHONENUMBER").text = phone
+            if mobile: etree.SubElement(ledger_xml, "MOBILENUMBER").text = mobile
+            if email: etree.SubElement(ledger_xml, "EMAIL").text = email
+
+            gstin = safe_str(row.get('Tally_GSTIN'))
+            gst_treatment = safe_str(row.get('GST Treatment'))
+            place_of_supply_code = safe_str(row.get('Tally_Place_of_Supply_Code'))
+
+            if gstin:
+                etree.SubElement(ledger_xml, "HASGSTIN").text = "Yes"
+                etree.SubElement(ledger_xml, "GSTREGISTRATIONTYPE").text = gst_treatment if gst_treatment in ['Regular', 'Consumer', 'Unregistered', 'Composition', 'SEZ'] else "Regular"
+                etree.SubElement(ledger_xml, "GSTIN").text = gstin
+                if place_of_supply_code:
+                    etree.SubElement(ledger_xml, "PLACEOFSUPPLY").text = place_of_supply_code.split('-')[0].strip()
+
+            etree.SubElement(ledger_xml, "LANGUAGENAME.LIST").append(
+                etree.fromstring(f"<NAME.LIST><NAME>{safe_str(party_name)}</NAME></NAME.LIST>")
+            )
+
+    if df_vendors is not None:
+        for index, row in df_vendors.iterrows():
+            party_name = safe_str(row.get('Tally_Party_Name', ''))
+            if not party_name:
+                st.warning(f"Skipping vendor due to empty name: Row {index+2}")
+                continue
+
+            ledger_xml = etree.SubElement(tally_message, "LEDGER", NAME=party_name, ACTION="CREATE")
+            etree.SubElement(ledger_xml, "NAME").text = party_name
+            etree.SubElement(ledger_xml, "PARENT").text = "Sundry Creditors"
+            etree.SubElement(ledger_xml, "ISBILLWISEON").text = "Yes"
+            etree.SubElement(ledger_xml, "OPENINGBALANCE").text = format_tally_amount(row.get('Opening Balance', 0.0))
+
+            add_address_details_to_party_xml(ledger_xml, row, is_shipping=False)
+
+            phone = safe_str(row.get('Tally_Phone'))
+            mobile = safe_str(row.get('Tally_Mobile'))
+            email = safe_str(row.get('Tally_Email'))
+
+            if phone: etree.SubElement(ledger_xml, "PHONENUMBER").text = phone
+            if mobile: etree.SubElement(ledger_xml, "MOBILENUMBER").text = mobile
+            if email: etree.SubElement(ledger_xml, "EMAIL").text = email
+
+            gstin = safe_str(row.get('Tally_GSTIN'))
+            gst_treatment = safe_str(row.get('GST Treatment'))
+
+            if gstin:
+                etree.SubElement(ledger_xml, "HASGSTIN").text = "Yes"
+                etree.SubElement(ledger_xml, "GSTREGISTRATIONTYPE").text = gst_treatment if gst_treatment in ['Regular', 'Consumer', 'Unregistered', 'Composition', 'SEZ'] else "Regular"
+                etree.SubElement(ledger_xml, "GSTIN").text = gstin
+
+            bank_acc_no = safe_str(row.get('Tally_Bank_Account_No'))
+            bank_name = safe_str(row.get('Tally_Bank_Name'))
+            ifsc_code = safe_str(row.get('Tally_IFSC_Code'))
+            if bank_acc_no and bank_name:
+                bank_details = etree.SubElement(ledger_xml, "BANKDETAILS.LIST")
+                etree.SubElement(bank_details, "BANKACCOUNTNO").text = bank_acc_no
+                etree.SubElement(bank_details, "BANKNAME").text = bank_name
+                if ifsc_code:
+                    etree.SubElement(bank_details, "IFSCCODE").text = ifsc_code
+
+            etree.SubElement(ledger_xml, "LANGUAGENAME.LIST").append(
+                etree.fromstring(f"<NAME.LIST><NAME>{safe_str(party_name)}</NAME></NAME.LIST>")
+            )
+
+    xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
+    st.success("Generated Contacts and Vendors XML.")
+    return xml_string
+
+
+def generate_sales_vouchers_xml(df_invoices):
+    st.info("Generating Sales Vouchers XML...")
+    if df_invoices is None: return None
+
+    envelope, tally_message = create_tally_envelope("Vouchers", "VOUCHERS")
+    df_invoices['Total'] = pd.to_numeric(df_invoices['Total'], errors='coerce').fillna(0)
+
+    # --- Implement "Last Edit" logic: Sort by date within each Invoice ID group ---
+    # Convert 'Invoice Date' to datetime for proper sorting
+    df_invoices['Invoice Date_dt'] = pd.to_datetime(df_invoices['Invoice Date'], errors='coerce')
+    # Filter out rows where date conversion failed and drop them for reliable sorting
+    df_invoices_filtered = df_invoices.dropna(subset=['Invoice Date_dt'])
+    
+    if df_invoices_filtered.empty:
+        st.warning("No valid invoices with valid dates found for Sales Voucher generation.")
+        return None # Return None if no valid data to process
+
+    # Group by Invoice ID, then sort each group by the datetime object in descending order (latest first)
+    # and then take the first entry of the sorted group for the header.
+    # The .transform('first') or .apply(lambda x: x.iloc[0]) approach for header might be tricky with sort.
+    # Better to sort the entire DF then groupby.
+
+    # Sort by Invoice ID and then by Invoice Date_dt (descending)
+    df_invoices_sorted = df_invoices_filtered.sort_values(by=['Invoice ID', 'Invoice Date_dt'], ascending=[True, False])
+    
+    # Now group by Invoice ID. For each group, the first row (iloc[0]) will be the latest date.
+    grouped_invoices = df_invoices_sorted.groupby('Invoice ID')
+
+    for invoice_id, group in grouped_invoices:
+        header = group.iloc[0] # This is now the latest entry by date for this Invoice ID
+        
+        total_amount = header.get('Total', 0.0)
+        if pd.isna(total_amount):
+            total_amount = 0.0
+
+        # --- IMPORTANT: Skip entirely if total amount is 0 and no meaningful entries can be generated ---
+        # This handles the "No Entries in Voucher!" error by not generating empty vouchers at all.
+        # If total_amount is 0.0, and after iterating line items, has_item_entries remains False,
+        # then it's an empty voucher. We skip generating it here.
+        
+        # Check if there's any line item with non-zero item_total or if overall total_amount is non-zero
+        # to decide if a voucher should be created.
+        relevant_line_items_exist = False
+        if total_amount != 0.0:
+            relevant_line_items_exist = True # If total is non-zero, we assume it's relevant
+        else: # If total_amount is zero, check if any individual item lines are non-zero.
+            for idx, item_row in group.iterrows():
+                item_total = item_row.get('Item Total', 0.0)
+                item_total = float(item_total) if not pd.isna(item_total) else 0.0
+                if item_total != 0.0:
+                    relevant_line_items_exist = True
+                    break
+        
+        if not relevant_line_items_exist:
+            st.info(f"Skipping Sales Voucher generation for ID: {invoice_id} ({header.get('Invoice Number', '')}) as it has a total amount of 0.0 and no valid line items.")
+            continue # Skip this voucher entirely
+
+        # Proceed with voucher generation only if relevant_line_items_exist is True
+        voucher = etree.SubElement(tally_message, "VOUCHER",
+                                   REMOTEID=safe_str(header.get('Invoice ID', '')),
+                                   VCHTYPE="Sales",
+                                   ACTION="CREATE")
+
+        etree.SubElement(voucher, "DATE").text = format_tally_date(header.get('Invoice Date', ''))
+        etree.SubElement(voucher, "GUID").text = f"SAL-{safe_str(header.get('Invoice ID', ''))}"
+        etree.SubElement(voucher, "VOUCHERTYPENAME").text = "Sales"
+        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(header.get('Invoice Number', '')) # Use the Invoice Number from the latest entry
+        etree.SubElement(voucher, "PARTYLEDGERNAME").text = safe_str(header.get('Customer Name', ''))
+        etree.SubElement(voucher, "BASICBUYERNAME").text = safe_str(header.get('Customer Name', ''))
+        etree.SubElement(voucher, "PERSISTEDVIEW").text = "Accounting Voucher"
+        place_supply_code = safe_str(header.get('Place of Supply(With State Code)', '')).split('-')[0].strip()
+        if place_supply_code:
+            etree.SubElement(voucher, "PLACEOFSUPPLY").text = place_supply_code
+
+        buyer_details = etree.SubElement(voucher, "BUYERDETAILS.LIST")
+        etree.SubElement(buyer_details, "CONSNAME").text = safe_str(header.get('Customer Name', ''))
+        cons_address_list = etree.SubElement(buyer_details, "ADDRESS.LIST")
+        
+        # Check for address columns before attempting to access
+        if 'Shipping Address' in header and safe_str(header.get('Shipping Address')):
+            etree.SubElement(cons_address_list, "ADDRESS").text = safe_str(header.get('Shipping Address'))
+            if 'Shipping Street2' in header and safe_str(header.get('Shipping Street2')):
+                etree.SubElement(cons_address_list, "ADDRESS").text = safe_str(header.get('Shipping Street2'))
+        elif 'Billing Address' in header and safe_str(header.get('Billing Address')):
+            etree.SubElement(cons_address_list, "ADDRESS").text = safe_str(header.get('Billing Address'))
+            if 'Billing Street2' in header and safe_str(header.get('Billing Street2')):
+                etree.SubElement(cons_address_list, "ADDRESS").text = safe_str(header.get('Billing Street2'))
+        
+        etree.SubElement(buyer_details, "STATENAME").text = safe_str(header.get('Shipping State', '') or header.get('Billing State', '') or '')
+        etree.SubElement(buyer_details, "COUNTRYNAME").text = safe_str(header.get('Shipping Country', '') or header.get('Billing Country', '') or DEFAULT_COUNTRY)
+        
+        gstin = safe_str(header.get('GST Identification Number (GSTIN)'))
+        if gstin:
+            etree.SubElement(buyer_details, "GSTREGISTRATIONTYPE").text = safe_str(header.get('GST Treatment', 'Regular'))
+            etree.SubElement(buyer_details, "GSTIN").text = gstin
+        
+        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(header.get('Invoice Date', ''))
+        etree.SubElement(voucher, "NARRATION").text = safe_str(header.get('Notes', ''))
+        
+        all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
+
+        # Credit the Party Ledger (Customer) - Always added if voucher is relevant
+        party_ledger_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+        etree.SubElement(party_ledger_entry, "LEDGERNAME").text = safe_str(header.get('Customer Name', ''))
+        etree.SubElement(party_ledger_entry, "ISDEEMEDPOSITIVE").text = "No"
+        etree.SubElement(party_ledger_entry, "AMOUNT").text = format_tally_amount(-total_amount)
+        
+        bill_allocation_list = etree.SubElement(party_ledger_entry, "BILLALLOCATIONS.LIST")
+        bill_allocation = etree.SubElement(bill_allocation_list, "BILLALLOCATIONS")
+        etree.SubElement(bill_allocation, "NAME").text = safe_str(header.get('Invoice Number', ''))
+        etree.SubElement(bill_allocation, "BILLTYPE").text = "New Ref"
+        etree.SubElement(bill_allocation, "AMOUNT").text = format_tally_amount(-total_amount)
+
+        # Process each line item (applies to all rows in the group for this invoice ID)
+        item_rows_processed_for_ledger = 0
+        for idx, item_row in group.iterrows():
+            item_name = safe_str(item_row.get('Item Name'))
+            item_desc = safe_str(item_row.get('Item Desc'))
+            
+            # Skip if both item name and description are empty
+            if not item_name and not item_desc:
+                continue
+
+            item_total = item_row.get('Item Total', 0.0)
+            item_total = float(item_total) if not pd.isna(item_total) else 0.0 # Ensure float conversion
+
+            # Only add ledger entry if item_total is not zero
+            if item_total != 0.0:
+                sales_ledger_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                etree.SubElement(sales_ledger_entry, "LEDGERNAME").text = 'Sales Account'
+                etree.SubElement(sales_ledger_entry, "ISDEEMEDPOSITIVE").text = "Yes"
+                etree.SubElement(sales_ledger_entry, "AMOUNT").text = format_tally_amount(item_total)
+                item_rows_processed_for_ledger += 1
+
+                # Ensure GST amounts are floats before comparison
+                cgst_amount = float(item_row.get('CGST', 0.0)) if not pd.isna(item_row.get('CGST')) else 0.0
+                sgst_amount = float(item_row.get('SGST', 0.0)) if not pd.isna(item_row.get('SGST')) else 0.0
+                igst_amount = float(item_row.get('IGST', 0.0)) if not pd.isna(item_row.get('IGST')) else 0.0
+
+                if igst_amount > 0:
+                    gst_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                    etree.SubElement(gst_entry, "LEDGERNAME").text = 'Output IGST'
+                    etree.SubElement(gst_entry, "ISDEEMEDPOSITIVE").text = "Yes"
+                    etree.SubElement(gst_entry, "AMOUNT").text = format_tally_amount(igst_amount)
+                
+                if cgst_amount > 0:
+                    gst_entry_cgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                    etree.SubElement(gst_entry_cgst, "LEDGERNAME").text = 'Output CGST'
+                    etree.SubElement(gst_entry_cgst, "ISDEEMEDPOSITIVE").text = "Yes"
+                    etree.SubElement(gst_entry_cgst, "AMOUNT").text = format_tally_amount(cgst_amount)
+                
+                if sgst_amount > 0:
+                    gst_entry_sgst = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+                    etree.SubElement(gst_entry_sgst, "LEDGERNAME").text = 'Output SGST'
+                    etree.SubElement(gst_entry_sgst, "ISDEEMEDPOSITIVE").text = "Yes"
+                    etree.SubElement(gst_entry_sgst, "AMOUNT").text = format_tally_amount(sgst_amount)
+
+        round_off_amount = header.get('Round Off', 0.0)
+        round_off_amount = float(round_off_amount) if not pd.isna(round_off_amount) else 0.0
+        
+        if round_off_amount != 0.0:
+            round_off_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
+            etree.SubElement(round_off_entry, "LEDGERNAME").text = 'Round Off'
+            etree.SubElement(round_off_entry, "ISDEEMEDPOSITIVE").text = "Yes" if round_off_amount > 0 else "No"
+            etree.SubElement(round_off_entry, "AMOUNT").text = format_tally_amount(round_off_amount)
+            item_rows_processed_for_ledger += 1 # Round off also counts as an entry for voucher validity
+
+        # The safeguard now operates based on `relevant_line_items_exist` check done *before* creating the voucher.
+        # So, if we reached this point, `relevant_line_items_exist` was True.
+        # If the only "relevant" item was a non-zero total, and individual line items were 0,
+        # then `item_rows_processed_for_ledger` might still be 0.
+        # In such cases, the `party_ledger_entry` is already sufficient (Total amount).
+        # We don't need an explicit generic_sales_entry here if party_ledger_entry is already there for the total.
+        # The key is that ALLLEDGERENTRIES.LIST should not be empty.
+        # Since party_ledger_entry is ALREADY added for total_amount, has_item_entries logic is less critical here
+        # regarding the "No Entries" error. This error usually comes if ALLLEDGERENTRIES.LIST ends up with 0 elements.
+        # The party ledger entry guarantees at least one.
+
+    xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
+    st.success("Generated Sales Vouchers XML.")
+    return xml_string
+
+
+def generate_customer_payments_xml(df_payments):
+    st.info("Generating Customer Payments (Receipt Vouchers) XML...")
+    if df_payments is None: return None
+
+    envelope, tally_message = create_tally_envelope("Vouchers", "VOUCHERS")
+
+    # Sort by Date descending to pick latest payment if Payment ID is duplicated (less common for payments)
+    df_payments['Date_dt'] = pd.to_datetime(df_payments['Date'], errors='coerce')
+    df_payments_filtered = df_payments.dropna(subset=['Date_dt'])
+
+    if df_payments_filtered.empty:
+        st.warning("No valid customer payments with valid dates found for Receipt Voucher generation.")
+        return None
+
+    df_payments_sorted = df_payments_filtered.sort_values(by=['CustomerPayment ID', 'Date_dt'], ascending=[True, False])
+    grouped_payments = df_payments_sorted.groupby('CustomerPayment ID')
+
+    for payment_id, group in grouped_payments:
+        header = group.iloc[0] # Latest entry by date for this payment ID
+
+        amount = header.get('Amount', 0.0)
         if pd.isna(amount): amount = 0.0
+        
+        # Skip generation if amount is zero, no point in importing empty payments
+        if amount == 0.0:
+            st.info(f"Skipping Receipt Voucher generation for ID: {payment_id} ({header.get('Payment Number', '')}) as it has a total amount of 0.0.")
+            continue
 
         voucher = etree.SubElement(tally_message, "VOUCHER",
                                    REMOTEID=payment_id,
                                    VCHTYPE="Receipt",
                                    ACTION="CREATE")
 
-        etree.SubElement(voucher, "DATE").text = format_tally_date(row.get('Date', ''))
+        etree.SubElement(voucher, "DATE").text = format_tally_date(header.get('Date', ''))
         etree.SubElement(voucher, "GUID").text = f"RCP-{payment_id}"
         etree.SubElement(voucher, "VOUCHERTYPENAME").text = "Receipt"
-        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(row.get('Payment Number', ''))
-        etree.SubElement(voucher, "NARRATION").text = safe_str(row.get('Description', 'Customer Payment'))
+        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(header.get('Payment Number', ''))
+        etree.SubElement(voucher, "NARRATION").text = safe_str(header.get('Description', 'Customer Payment'))
         etree.SubElement(voucher, "BASICBASECURRENTBAL").text = format_tally_amount(amount)
-        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(row.get('Date', ''))
+        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(header.get('Date', ''))
 
         all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
 
         debit_bank_cash = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-        # This now refers to the mandatory 'Cash-in-Hand' or the actual bank name if present and created
-        etree.SubElement(debit_bank_cash, "LEDGERNAME").text = safe_str(row.get('Tally_Deposit_Ledger', 'Cash-in-Hand'))
+        etree.SubElement(debit_bank_cash, "LEDGERNAME").text = safe_str(header.get('Tally_Deposit_Ledger', 'Cash-in-Hand'))
         etree.SubElement(debit_bank_cash, "ISDEEMEDPOSITIVE").text = "Yes"
         etree.SubElement(debit_bank_cash, "AMOUNT").text = format_tally_amount(amount)
 
         credit_customer = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-        etree.SubElement(credit_customer, "LEDGERNAME").text = safe_str(row.get('Customer Name', ''))
+        etree.SubElement(credit_customer, "LEDGERNAME").text = safe_str(header.get('Customer Name', ''))
         etree.SubElement(credit_customer, "ISDEEMEDPOSITIVE").text = "No"
         etree.SubElement(credit_customer, "AMOUNT").text = format_tally_amount(-amount)
 
-        invoice_number = safe_str(row.get('Invoice Number'))
-        amount_applied = row.get('Amount Applied to Invoice', 0.0)
+        invoice_number = safe_str(header.get('Invoice Number'))
+        amount_applied = header.get('Amount Applied to Invoice', 0.0)
         if pd.isna(amount_applied): amount_applied = 0.0
 
         if invoice_number and amount_applied != 0:
@@ -499,37 +1154,51 @@ def generate_vendor_payments_xml(df_payments):
 
     envelope, tally_message = create_tally_envelope("Vouchers", "VOUCHERS")
 
-    for index, row in df_payments.iterrows():
-        payment_id = safe_str(row.get('VendorPayment ID', ''))
-        if not payment_id:
-            st.warning(f"Skipping vendor payment due to empty ID: Row {index+2}")
+    # Sort by Date descending to pick latest payment if Payment ID is duplicated (less common for payments)
+    df_payments['Date_dt'] = pd.to_datetime(df_payments['Date'], errors='coerce')
+    df_payments_filtered = df_payments.dropna(subset=['Date_dt'])
+
+    if df_payments_filtered.empty:
+        st.warning("No valid vendor payments with valid dates found for Payment Voucher generation.")
+        return None
+
+    df_payments_sorted = df_payments_filtered.sort_values(by=['VendorPayment ID', 'Date_dt'], ascending=[True, False])
+    grouped_payments = df_payments_sorted.groupby('VendorPayment ID')
+
+    for payment_id, group in grouped_payments:
+        header = group.iloc[0] # Latest entry by date for this payment ID
+
+        amount = header.get('Amount', 0.0)
+        if pd.isna(amount): amount = 0.0
+
+        # Skip generation if amount is zero, no point in importing empty payments
+        if amount == 0.0:
+            st.info(f"Skipping Payment Voucher generation for ID: {payment_id} ({header.get('Payment Number', '')}) as it has a total amount of 0.0.")
             continue
 
-        amount = row.get('Amount', 0.0)
-        if pd.isna(amount): amount = 0.0
 
         voucher = etree.SubElement(tally_message, "VOUCHER",
                                    REMOTEID=payment_id,
                                    VCHTYPE="Payment",
                                    ACTION="CREATE")
 
-        etree.SubElement(voucher, "DATE").text = format_tally_date(row.get('Date', ''))
+        etree.SubElement(voucher, "DATE").text = format_tally_date(header.get('Date', ''))
         etree.SubElement(voucher, "GUID").text = f"PAY-{payment_id}"
         etree.SubElement(voucher, "VOUCHERTYPENAME").text = "Payment"
-        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(row.get('Payment Number', ''))
-        etree.SubElement(voucher, "NARRATION").text = safe_str(row.get('Description', 'Vendor Payment'))
+        etree.SubElement(voucher, "VOUCHERNUMBER").text = safe_str(header.get('Payment Number', ''))
+        etree.SubElement(voucher, "NARRATION").text = safe_str(header.get('Description', 'Vendor Payment'))
         etree.SubElement(voucher, "BASICBASECURRENTBAL").text = format_tally_amount(amount)
-        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(row.get('Date', ''))
+        etree.SubElement(voucher, "EFFECTIVEDATE").text = format_tally_date(header.get('Date', ''))
 
         all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
 
         debit_vendor = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-        etree.SubElement(debit_vendor, "LEDGERNAME").text = safe_str(row.get('Vendor Name', ''))
+        etree.SubElement(debit_vendor, "LEDGERNAME").text = safe_str(header.get('Vendor Name', ''))
         etree.SubElement(debit_vendor, "ISDEEMEDPOSITIVE").text = "Yes"
         etree.SubElement(debit_vendor, "AMOUNT").text = format_tally_amount(amount)
 
-        bill_number = safe_str(row.get('Bill Number'))
-        bill_amount_applied = row.get('Bill Amount', 0.0)
+        bill_number = safe_str(header.get('Bill Number'))
+        bill_amount_applied = header.get('Bill Amount', 0.0)
         if pd.isna(bill_amount_applied): bill_amount_applied = 0.0
 
         if bill_number and bill_amount_applied != 0:
@@ -540,8 +1209,7 @@ def generate_vendor_payments_xml(df_payments):
             etree.SubElement(bill_details, "AMOUNT").text = format_tally_amount(bill_amount_applied)
 
         credit_bank_cash = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-        # This now refers to the mandatory 'Cash-in-Hand' or the actual bank name if present and created
-        etree.SubElement(credit_bank_cash, "LEDGERNAME").text = safe_str(row.get('Tally_Paid_Through_Ledger', 'Cash-in-Hand'))
+        etree.SubElement(credit_bank_cash, "LEDGERNAME").text = safe_str(header.get('Tally_Paid_Through_Ledger', 'Cash-in-Hand'))
         etree.SubElement(credit_bank_cash, "ISDEEMEDPOSITIVE").text = "No"
         etree.SubElement(credit_bank_cash, "AMOUNT").text = format_tally_amount(-amount)
 
@@ -556,13 +1224,40 @@ def generate_credit_notes_xml(df_credit_notes):
 
     envelope, tally_message = create_tally_envelope("Vouchers", "VOUCHERS")
     df_credit_notes['Total'] = pd.to_numeric(df_credit_notes['Total'], errors='coerce').fillna(0)
-    grouped_credit_notes = df_credit_notes.groupby('CreditNotes ID')
+
+    # Sort by Date descending to pick latest credit note if CreditNotes ID is duplicated
+    df_credit_notes['Credit Note Date_dt'] = pd.to_datetime(df_credit_notes['Credit Note Date'], errors='coerce')
+    df_credit_notes_filtered = df_credit_notes.dropna(subset=['Credit Note Date_dt'])
+
+    if df_credit_notes_filtered.empty:
+        st.warning("No valid credit notes with valid dates found for Credit Note Voucher generation.")
+        return None
+
+    df_credit_notes_sorted = df_credit_notes_filtered.sort_values(by=['CreditNotes ID', 'Credit Note Date_dt'], ascending=[True, False])
+    grouped_credit_notes = df_credit_notes_sorted.groupby('CreditNotes ID')
+
 
     for credit_note_id, group in grouped_credit_notes:
-        header = group.iloc[0]
+        header = group.iloc[0] # Latest entry by date for this CreditNotes ID
         
         total_amount = header.get('Total', 0.0)
         if pd.isna(total_amount): total_amount = 0.0
+
+        # Skip generation if total amount is 0.0 and no relevant line items exist
+        relevant_line_items_exist = False
+        if total_amount != 0.0:
+            relevant_line_items_exist = True
+        else:
+            for idx, item_row in group.iterrows():
+                item_total = item_row.get('Item Total', 0.0)
+                item_total = float(item_total) if not pd.isna(item_total) else 0.0
+                if item_total != 0.0:
+                    relevant_line_items_exist = True
+                    break
+        
+        if not relevant_line_items_exist:
+            st.info(f"Skipping Credit Note Voucher generation for ID: {credit_note_id} ({header.get('Credit Note Number', '')}) as it has a total amount of 0.0 and no valid line items.")
+            continue
 
         voucher = etree.SubElement(tally_message, "VOUCHER",
                                    REMOTEID=safe_str(header.get('CreditNotes ID', '')),
@@ -610,9 +1305,6 @@ def generate_credit_notes_xml(df_credit_notes):
 
         all_ledger_entries = etree.SubElement(voucher, "ALLLEDGERENTRIES.LIST")
 
-        # Flag to track if any item entries were added
-        has_item_entries = False
-
         for idx, item_row in group.iterrows():
             item_name = safe_str(item_row.get('Item Name'))
             item_desc = safe_str(item_row.get('Item Desc'))
@@ -630,7 +1322,6 @@ def generate_credit_notes_xml(df_credit_notes):
                 etree.SubElement(debit_sales_return, "LEDGERNAME").text = 'Sales Returns'
                 etree.SubElement(debit_sales_return, "ISDEEMEDPOSITIVE").text = "Yes"
                 etree.SubElement(debit_sales_return, "AMOUNT").text = format_tally_amount(item_total)
-                has_item_entries = True
 
                 cgst_amount = float(item_row.get('CGST', 0.0)) if not pd.isna(item_row.get('CGST')) else 0.0
                 sgst_amount = float(item_row.get('SGST', 0.0)) if not pd.isna(item_row.get('SGST')) else 0.0
@@ -668,18 +1359,8 @@ def generate_credit_notes_xml(df_credit_notes):
             etree.SubElement(bill_details, "BILLTYPE").text = "Agst Ref"
             etree.SubElement(bill_details, "AMOUNT").text = format_tally_amount(-total_amount)
 
-        # --- SAFEGURAD AGAINST "No Entries in Voucher!" ERROR for Credit Notes ---
-        # If no item-related entries AND total_amount is not zero (meaning there should have been an entry)
-        # add a generic 'Sales Returns' entry to ensure the voucher is not empty.
-        if not has_item_entries and total_amount != 0.0:
-            st.warning(f"Credit Note ID: {credit_note_id} ({header.get('Credit Note Number', '')}) has no valid line items. Adding a generic 'Sales Returns' entry for the total amount to avoid 'No Entries in Voucher!' error.")
-            generic_sales_return_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-            etree.SubElement(generic_sales_return_entry, "LEDGERNAME").text = 'Sales Returns'
-            etree.SubElement(generic_sales_return_entry, "ISDEEMEDPOSITIVE").text = "Yes" # Debit for sales return
-            etree.SubElement(generic_sales_return_entry, "AMOUNT").text = format_tally_amount(total_amount)
-        elif not has_item_entries and total_amount == 0.0:
-             st.info(f"Credit Note ID: {credit_note_id} ({header.get('Credit Note Number', '')}) has no valid line items and a total amount of 0.0. This voucher will likely be skipped by Tally if it has no entries.")
-
+        # The safeguard for "No Entries in Voucher!" is now handled by the initial check for `relevant_line_items_exist`.
+        # No additional generic entry needed here as it's skipped if irrelevant.
 
     xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
     st.success("Generated Credit Notes XML.")
@@ -756,13 +1437,41 @@ def generate_purchase_vouchers_xml(df_bills):
 
     envelope, tally_message = create_tally_envelope("Vouchers", "VOUCHERS")
     df_bills['Total'] = pd.to_numeric(df_bills['Total'], errors='coerce').fillna(0)
-    grouped_bills = df_bills.groupby('Bill ID')
+    
+    # --- Implement "Last Edit" logic: Sort by date within each Bill ID group ---
+    df_bills['Bill Date_dt'] = pd.to_datetime(df_bills['Bill Date'], errors='coerce')
+    df_bills_filtered = df_bills.dropna(subset=['Bill Date_dt'])
+    
+    if df_bills_filtered.empty:
+        st.warning("No valid bills with valid dates found for Purchase Voucher generation.")
+        return None # Return None if no valid data to process
+
+    df_bills_sorted = df_bills_filtered.sort_values(by=['Bill ID', 'Bill Date_dt'], ascending=[True, False])
+    grouped_bills = df_bills_sorted.groupby('Bill ID')
+
 
     for bill_id, group in grouped_bills:
-        header = group.iloc[0]
+        header = group.iloc[0] # This is now the latest entry by date for this Bill ID
 
         total_amount = header.get('Total', 0.0)
         if pd.isna(total_amount): total_amount = 0.0
+
+        # --- IMPORTANT: Skip entirely if total amount is 0 and no meaningful entries can be generated ---
+        relevant_line_items_exist = False
+        if total_amount != 0.0:
+            relevant_line_items_exist = True
+        else:
+            for idx, item_row in group.iterrows():
+                item_total = item_row.get('Item Total', 0.0)
+                item_total = float(item_total) if not pd.isna(item_total) else 0.0
+                if item_total != 0.0:
+                    relevant_line_items_exist = True
+                    break
+        
+        if not relevant_line_items_exist:
+            st.info(f"Skipping Purchase Voucher generation for ID: {bill_id} ({header.get('Bill Number', '')}) as it has a total amount of 0.0 and no valid line items.")
+            continue # Skip this voucher entirely
+
 
         voucher = etree.SubElement(tally_message, "VOUCHER",
                                    REMOTEID=safe_str(header.get('Bill ID', '')),
@@ -850,17 +1559,8 @@ def generate_purchase_vouchers_xml(df_bills):
             etree.SubElement(round_off_entry, "AMOUNT").text = format_tally_amount(adjustment_amount)
             has_item_entries = True # Round off also counts as an entry for voucher validity
 
-        # --- SAFEGURAD AGAINST "No Entries in Voucher!" ERROR ---
-        # If no item-related ledger entries were added (meaning no valid items/amounts),
-        # add a single purchase account entry for the total amount to prevent Tally error.
-        if not has_item_entries and total_amount != 0.0:
-            st.warning(f"Voucher ID: {bill_id} ({header.get('Bill Number', '')}) has no valid line items. Adding a generic 'Purchase Account' entry for the total amount to avoid 'No Entries in Voucher!' error.")
-            generic_purchase_entry = etree.SubElement(all_ledger_entries, "ALLLEDGERENTRIES")
-            etree.SubElement(generic_purchase_entry, "LEDGERNAME").text = 'Purchase Account'
-            etree.SubElement(generic_purchase_entry, "ISDEEMEDPOSITIVE").text = "Yes"
-            etree.SubElement(generic_purchase_entry, "AMOUNT").text = format_tally_amount(total_amount)
-        elif not has_item_entries and total_amount == 0.0:
-             st.info(f"Voucher ID: {bill_id} ({header.get('Bill Number', '')}) has no valid line items and a total amount of 0.0. This voucher will likely be skipped by Tally if it has no entries.")
+        # The safeguard for "No Entries in Voucher!" is now handled by the initial check for `relevant_line_items_exist`.
+        # No additional generic entry needed here as it's skipped if irrelevant.
 
     xml_string = etree.tostring(envelope, pretty_print=True, encoding='utf-8', xml_declaration=True, standalone=True).decode('utf-8')
     st.success("Generated Purchase Vouchers XML.")
@@ -918,6 +1618,9 @@ if uploaded_file is not None:
             processed_dfs = {}
             
             # --- Call processing functions with robust error handling ---
+            # Order is important: Helpers, then process_*, then generate_*
+            
+            # Process functions (all defined before this block now)
             try:
                 processed_dfs['coa'] = process_chart_of_accounts(raw_dfs.get('Chart_of_Accounts.csv'))
             except Exception as e:
@@ -978,6 +1681,7 @@ if uploaded_file is not None:
             generated_xmls = {}
 
             # --- Generate XMLs in recommended order with empty DataFrame check ---
+            # All generate_* functions are now defined before this block.
             try:
                 if processed_dfs.get('coa') is not None and not processed_dfs['coa'].empty:
                     generated_xmls['tally_ledgers.xml'] = generate_ledgers_xml(processed_dfs['coa'])
@@ -1093,11 +1797,11 @@ This guide provides step-by-step instructions on how to import the generated XML
 
 * **TEST FIRST:** **ALWAYS perform a test import** into a brand-new, empty Tally company before attempting to import into your live production company. This is the single most important step to identify and resolve any mapping issues or errors without corrupting your actual data.
 * **BACKUP:** Before any import into your live Tally company, take a **complete backup** of your Tally data.
-* **TALLY COMPANY NAME:** Ensure the Tally Company Name in the script's configuration (`{TALLY_COMPANY_NAME}`) **exactly matches** the company you are importing into in Tally.
+* **TALLY COMPANY NAME:** Ensure the Tally Company Name in the script's configuration (`{{TALLY_COMPANY_NAME}}`) **exactly matches** the company you are importing into in Tally.
 * **<span style="color:red;font-weight:bold;">CRITICAL: TALLY FINANCIAL YEAR SETTING</span>**: Your previous import logs showed many "The date is Out of Range!" errors. This is because your Zoho transactions are from 2023, but your new Tally company likely defaults to the current financial year (e.g., Apr 2025 - Mar 2026). **The Python script CANNOT change this in Tally.**
     * **Action**: Before importing any transactions, you **MUST** change your Tally company's financial year to encompass your oldest transaction date.
         1.  Open Tally (Prime or ERP 9).
-        2.  Select your company (`{TALLY_COMPANY_NAME}`).
+        2.  Select your company (`{{TALLY_COMPANY_NAME}}`).
         3.  Go to `Gateway of Tally`.
         4.  In Tally Prime: Press `Alt + K` (Company) -> `Alter`.
         5.  In Tally ERP 9: Press `Alt + F3` (Company Info) -> `Alter`.
@@ -1140,12 +1844,12 @@ Tally generally requires a specific sequence for importing data to maintain data
 1.  **<span style="color:red;font-weight:bold;">CRITICAL PRE-STEP: Adjust Tally Financial Year (as instructed above).</span>**
 2.  **Open your Tally ERP Company:**
     * Launch Tally ERP 9 or Tally Prime.
-    * Select the **new, empty company** you created for testing purposes (e.g., `'{TALLY_COMPANY_NAME}'`).
+    * Select the **new, empty company** you created for testing purposes (e.g., `{{TALLY_COMPANY_NAME}}`).
 3.  **Locate the Generated XML Files:**
     * The XML files are located in the `output/` directory relative to where you ran `zoho_to_tally_app.py`.
     * Example Path: `C:\path\to\your\ZohoTallyMigration\output\` (if running locally)
 4.  **Navigate to Import Data in Tally:**
-    * From the **Gateway of Tally**:
+    * From the `Gateway of Tally`:
         * Press `Alt + O` (Import Data)
         * Select `Masters` for ledger/group XMLs.
         * Select `Vouchers` for transaction XMLs.
