@@ -514,15 +514,28 @@ if uploaded_zip is not None:
         
         try:
             with zipfile.ZipFile(zip_path, 'r') as zf:
-                # Find the root folder inside the zip
-                root_folder = ""
-                for member in zf.namelist():
-                    if member.endswith('/') and member.count('/') == 1:
-                        root_folder = member
-                        break
-                
-                if not root_folder:
-                     st.error("Could not determine the root data folder inside the ZIP file. Please ensure the ZIP structure is standard.")
+                # Find the root folder inside the zip more robustly.
+                # It finds the first expected CSV and assumes its directory is the root.
+                root_folder = None
+                # Create a list of files to check, starting with the most likely ones
+                files_to_search = ['Chart_of_Accounts.csv', 'Invoice.csv', 'Contacts.csv'] + ZOHO_CSVS
+
+                for file_name_to_find in files_to_search:
+                    for member_path in zf.namelist():
+                        # Normalize path separators for consistency
+                        normalized_path = member_path.replace('\\', '/')
+                        if normalized_path.endswith('/' + file_name_to_find) or normalized_path == file_name_to_find:
+                            # The directory part of the path is our root folder
+                            root_folder = os.path.dirname(normalized_path)
+                            # Add a trailing slash if the folder is not the root of the zip
+                            if root_folder:
+                                root_folder += '/'
+                            break # Exit inner loop once found
+                    if root_folder is not None:
+                        break # Exit outer loop once found
+
+                if root_folder is None:
+                     st.error("Could not determine the root data folder inside the ZIP file. Please ensure the ZIP structure is standard and contains expected CSVs.")
                      st.stop()
 
 
