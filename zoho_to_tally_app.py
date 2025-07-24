@@ -453,8 +453,8 @@ def process_journals(df):
 
     df_cleaned = df.copy()
     # Replace NaN with 0 in debit/credit columns to avoid errors
-    df_cleaned['Debits'] = pd.to_numeric(df_cleaned['Debits'], errors='coerce').fillna(0)
-    df_cleaned['Credits'] = pd.to_numeric(df_cleaned['Credits'], errors='coerce').fillna(0)
+    df_cleaned['Debit'] = pd.to_numeric(df_cleaned['Debit'], errors='coerce').fillna(0)
+    df_cleaned['Credit'] = pd.to_numeric(df_cleaned['Credit'], errors='coerce').fillna(0)
     
     df_cleaned = format_date_column(df_cleaned, 'Journal Date')
 
@@ -473,8 +473,8 @@ def process_journals(df):
         etree.SubElement(vch, 'NARRATION').text = safe_str(first_row['Notes'])
 
         for _, row in group.iterrows():
-            debit_amount = row['Debits']
-            credit_amount = row['Credits']
+            debit_amount = row['Debit']
+            credit_amount = row['Credit']
 
             if debit_amount > 0:
                 # This is a Debit Entry
