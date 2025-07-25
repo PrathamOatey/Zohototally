@@ -84,7 +84,8 @@ def process_chart_of_accounts(df):
         'Expense': 'Direct Expenses', 'Cost of Goods Sold': 'Purchase Accounts',
         'Other Expense': 'Indirect Expenses'
     }
-    df_cleaned['TALLYGROUP'] = df_cleaned['Account Type'].map(parent_map).fillna('Suspense')
+    # Use 'Suspense A/c' as the fallback, which is Tally's default.
+    df_cleaned['TALLYGROUP'] = df_cleaned['Account Type'].map(parent_map).fillna('Suspense A/c')
     
     tally_message = etree.Element('TALLYMESSAGE', xmlns_UDF="TallyUDF")
     for _, row in df_cleaned.iterrows():
@@ -106,6 +107,14 @@ def process_items(df):
         return None, "Items data is missing or empty."
     df_cleaned = df.copy()
     tally_message = etree.Element('TALLYMESSAGE', xmlns_UDF="TallyUDF")
+    
+    # --- Create Unit of Measure Master ---
+    # This prevents the "Unit 'Nos' does not exist" error in Tally.
+    unit = etree.SubElement(tally_message, 'UNIT', NAME="Nos", ACTION="Create")
+    etree.SubElement(unit, 'NAME').text = "Nos"
+    etree.SubElement(unit, 'ISSIMPLEUNIT').text = "Yes"
+    etree.SubElement(unit, 'FORMALNAME').text = "Numbers"
+
     for _, row in df_cleaned.iterrows():
         item_name = safe_str(row['Item Name'])
         stock_group_name = safe_str(row.get('Item Type', 'Primary')) or 'Primary'
@@ -138,8 +147,12 @@ def process_contacts(df):
     for _, row in df_cleaned.iterrows():
         customer_name = f"{safe_str(row['First Name'])} {safe_str(row['Last Name'])}".strip() or safe_str(row['Company Name'])
         
+        # Skip rows where the name is blank to prevent "No Valid Names!" error.
+        if not customer_name:
+            continue
+            
         # Populate the global map for later reference by vouchers
-        customer_id = safe_str(row.get('Contact ID')) # The column name in Contacts.csv
+        customer_id = safe_str(row.get('Contact ID'))
         if customer_id:
             CUSTOMER_ID_TO_NAME_MAP[customer_id] = customer_name
 
@@ -150,11 +163,9 @@ def process_contacts(df):
         
         address = etree.SubElement(ledger, 'ADDRESS.LIST', TYPE="String")
         etree.SubElement(address, 'ADDRESS').text = safe_str(row.get('Billing Street', ''))
-        etree.SubElement(address, 'ADDRESS').text = safe_str(row.get('Billing City', ''))
         
         etree.SubElement(ledger, 'MAILINGNAME').text = customer_name
         etree.SubElement(ledger, 'STATE').text = safe_str(row.get('Billing State', ''))
-        etree.SubElement(ledger, 'PINCODE').text = safe_str(row.get('Billing Code', ''))
         
         if 'Opening Balance' in df_cleaned.columns and pd.notna(row['Opening Balance']) and row['Opening Balance'] != 0:
             opening_balance = float(row['Opening Balance'])
@@ -179,9 +190,13 @@ def process_vendors(df):
 
     for _, row in df_cleaned.iterrows():
         vendor_name = f"{safe_str(row['First Name'])} {safe_str(row['Last Name'])}".strip() or safe_str(row['Company Name'])
+        
+        # Skip rows where the name is blank
+        if not vendor_name:
+            continue
 
         # Populate the global map for later reference
-        vendor_id = safe_str(row.get('Contact ID')) # The column name in Vendors.csv
+        vendor_id = safe_str(row.get('Contact ID'))
         if vendor_id:
             VENDOR_ID_TO_NAME_MAP[vendor_id] = vendor_name
 
@@ -194,7 +209,6 @@ def process_vendors(df):
         etree.SubElement(address, 'ADDRESS').text = safe_str(row.get('Billing Street', ''))
         
         etree.SubElement(ledger, 'MAILINGNAME').text = vendor_name
-        etree.SubElement(ledger, 'STATE').text = safe_str(row.get('Billing State', ''))
         
         if 'Opening Balance' in df_cleaned.columns and pd.notna(row['Opening Balance']) and row['Opening Balance'] != 0:
             opening_balance = float(row['Opening Balance'])
@@ -202,6 +216,14 @@ def process_vendors(df):
             etree.SubElement(ledger, 'OPENINGBALANCE').text = balance_text
 
     return tally_message, None
+
+def create_ledger_if_not_exists(tally_message, ledger_name, parent_group, known_ledgers_set):
+    """Helper to add a ledger creation block to the XML if it's new."""
+    if ledger_name and ledger_name not in known_ledgers_set:
+        ledger = etree.SubElement(tally_message, 'LEDGER', NAME=ledger_name, ACTION="Create")
+        etree.SubElement(ledger, 'PARENT').text = parent_group
+        etree.SubElement(ledger, 'ISBILLWISEON').text = "Yes" if "Sundry" in parent_group else "No"
+        known_ledgers_set.add(ledger_name)
 
 def process_invoices(df):
     """Processes Invoice.csv to create Tally Sales Vouchers."""
@@ -211,22 +233,17 @@ def process_invoices(df):
 
     tally_message = etree.Element('TALLYMESSAGE', xmlns_UDF="TallyUDF")
     ledgers_in_this_file = set()
+    create_ledger_if_not_exists(tally_message, "Sales", "Sales Accounts", ledgers_in_this_file)
 
     for _, row in df_cleaned.iterrows():
         customer_id = safe_str(row.get('Customer ID'))
         customer_name = CUSTOMER_ID_TO_NAME_MAP.get(customer_id, safe_str(row['Customer Name']))
         
-        # Auto-create ledger if it's missing, to prevent import errors.
-        if customer_name and customer_name not in ledgers_in_this_file:
-            ledger = etree.SubElement(tally_message, 'LEDGER', NAME=customer_name, ACTION="Create")
-            etree.SubElement(ledger, 'PARENT').text = 'Sundry Debtors'
-            etree.SubElement(ledger, 'ISBILLWISEON').text = "Yes"
-            ledgers_in_this_file.add(customer_name)
+        create_ledger_if_not_exists(tally_message, customer_name, "Sundry Debtors", ledgers_in_this_file)
             
         vch = etree.SubElement(tally_message, 'VOUCHER', VCHTYPE="Sales", ACTION="Create")
         etree.SubElement(vch, 'DATE').text = safe_str(row['Invoice Date'])
         etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Invoice Number'])
-        etree.SubElement(vch, 'NARRATION').text = f"Sales against Invoice {safe_str(row['Invoice Number'])}"
         
         total_amount = float(row['Total'])
         debtor_ledger = etree.SubElement(vch, 'ALLLEDGERENTRIES.LIST')
@@ -254,19 +271,16 @@ def process_customer_payments(df):
 
     tally_message = etree.Element('TALLYMESSAGE', xmlns_UDF="TallyUDF")
     ledgers_in_this_file = set()
+    create_ledger_if_not_exists(tally_message, "Bank", "Bank Accounts", ledgers_in_this_file)
 
     for _, row in df_cleaned.iterrows():
         customer_id = safe_str(row.get('CustomerID'))
         customer_name = CUSTOMER_ID_TO_NAME_MAP.get(customer_id, safe_str(row['Customer Name']))
 
-        if customer_name and customer_name not in ledgers_in_this_file:
-            ledger = etree.SubElement(tally_message, 'LEDGER', NAME=customer_name, ACTION="Create")
-            etree.SubElement(ledger, 'PARENT').text = 'Sundry Debtors'
-            ledgers_in_this_file.add(customer_name)
+        create_ledger_if_not_exists(tally_message, customer_name, "Sundry Debtors", ledgers_in_this_file)
             
         vch = etree.SubElement(tally_message, 'VOUCHER', VCHTYPE="Receipt", ACTION="Create")
         etree.SubElement(vch, 'DATE').text = safe_str(row['Date'])
-        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Payment Number'])
         
         amount_received = float(row['Amount'])
         bank_ledger = etree.SubElement(vch, 'ALLLEDGERENTRIES.LIST')
@@ -295,16 +309,12 @@ def process_bills(df):
 
     tally_message = etree.Element('TALLYMESSAGE', xmlns_UDF="TallyUDF")
     ledgers_in_this_file = set()
+    create_ledger_if_not_exists(tally_message, "Purchase", "Purchase Accounts", ledgers_in_this_file)
 
     for _, row in df_cleaned.iterrows():
-        # Note: Bill.csv does not have a Vendor ID, so we must rely on name.
         vendor_name = safe_str(row['Vendor Name'])
 
-        if vendor_name and vendor_name not in ledgers_in_this_file:
-            ledger = etree.SubElement(tally_message, 'LEDGER', NAME=vendor_name, ACTION="Create")
-            etree.SubElement(ledger, 'PARENT').text = 'Sundry Creditors'
-            etree.SubElement(ledger, 'ISBILLWISEON').text = "Yes"
-            ledgers_in_this_file.add(vendor_name)
+        create_ledger_if_not_exists(tally_message, vendor_name, "Sundry Creditors", ledgers_in_this_file)
             
         vch = etree.SubElement(tally_message, 'VOUCHER', VCHTYPE="Purchase", ACTION="Create")
         etree.SubElement(vch, 'DATE').text = safe_str(row['Bill Date'])
@@ -336,19 +346,15 @@ def process_vendor_payments(df):
 
     tally_message = etree.Element('TALLYMESSAGE', xmlns_UDF="TallyUDF")
     ledgers_in_this_file = set()
+    create_ledger_if_not_exists(tally_message, "Bank", "Bank Accounts", ledgers_in_this_file)
 
     for _, row in df_cleaned.iterrows():
-        # Note: Vendor_Payment.csv also lacks a reliable Vendor ID.
         vendor_name = safe_str(row['Vendor Name'])
         
-        if vendor_name and vendor_name not in ledgers_in_this_file:
-            ledger = etree.SubElement(tally_message, 'LEDGER', NAME=vendor_name, ACTION="Create")
-            etree.SubElement(ledger, 'PARENT').text = 'Sundry Creditors'
-            ledgers_in_this_file.add(vendor_name)
+        create_ledger_if_not_exists(tally_message, vendor_name, "Sundry Creditors", ledgers_in_this_file)
 
         vch = etree.SubElement(tally_message, 'VOUCHER', VCHTYPE="Payment", ACTION="Create")
         etree.SubElement(vch, 'DATE').text = safe_str(row['Date'])
-        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Payment Number'])
         
         amount_paid = float(row['Amount'])
         vendor_ledger = etree.SubElement(vch, 'ALLLEDGERENTRIES.LIST')
@@ -378,19 +384,16 @@ def process_credit_notes(df):
 
     tally_message = etree.Element('TALLYMESSAGE', xmlns_UDF="TallyUDF")
     ledgers_in_this_file = set()
+    create_ledger_if_not_exists(tally_message, "Sales", "Sales Accounts", ledgers_in_this_file)
 
     for _, row in df_cleaned.iterrows():
         customer_id = safe_str(row.get('Customer ID'))
         customer_name = CUSTOMER_ID_TO_NAME_MAP.get(customer_id, safe_str(row['Customer Name']))
 
-        if customer_name and customer_name not in ledgers_in_this_file:
-            ledger = etree.SubElement(tally_message, 'LEDGER', NAME=customer_name, ACTION="Create")
-            etree.SubElement(ledger, 'PARENT').text = 'Sundry Debtors'
-            ledgers_in_this_file.add(customer_name)
+        create_ledger_if_not_exists(tally_message, customer_name, "Sundry Debtors", ledgers_in_this_file)
             
         vch = etree.SubElement(tally_message, 'VOUCHER', VCHTYPE="Credit Note", ACTION="Create")
         etree.SubElement(vch, 'DATE').text = safe_str(row['Credit Note Date'])
-        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(row['Credit Note Number'])
         
         total_amount = float(row['Total'])
         sales_return_ledger = etree.SubElement(vch, 'ALLLEDGERENTRIES.LIST')
@@ -420,25 +423,29 @@ def process_journals(df):
     df_cleaned = format_date_column(df_cleaned, 'Journal Date')
 
     tally_message = etree.Element('TALLYMESSAGE', xmlns_UDF="TallyUDF")
+    ledgers_in_this_file = set()
     
     for journal_id, group in df_cleaned.groupby('Journal Number'):
         if group.empty: continue
         first_row = group.iloc[0]
         vch = etree.SubElement(tally_message, 'VOUCHER', VCHTYPE="Journal", ACTION="Create")
         etree.SubElement(vch, 'DATE').text = safe_str(first_row['Journal Date'])
-        etree.SubElement(vch, 'VOUCHERNUMBER').text = safe_str(first_row['Journal Number'])
         etree.SubElement(vch, 'NARRATION').text = safe_str(first_row['Notes'])
 
         for _, row in group.iterrows():
+            account_name = safe_str(row['Account'])
+            # Journals can have any ledger. Auto-create them under Suspense if they are new.
+            create_ledger_if_not_exists(tally_message, account_name, "Suspense A/c", ledgers_in_this_file)
+
             if row['Debit'] > 0:
                 ledger_entry = etree.SubElement(vch, 'ALLLEDGERENTRIES.LIST')
-                etree.SubElement(ledger_entry, 'LEDGERNAME').text = safe_str(row['Account'])
+                etree.SubElement(ledger_entry, 'LEDGERNAME').text = account_name
                 etree.SubElement(ledger_entry, 'ISDEEMEDPOSITIVE').text = "Yes"
                 etree.SubElement(ledger_entry, 'AMOUNT').text = f"-{row['Debit']}"
             
             if row['Credit'] > 0:
                 ledger_entry = etree.SubElement(vch, 'ALLLEDGERENTRIES.LIST')
-                etree.SubElement(ledger_entry, 'LEDGERNAME').text = safe_str(row['Account'])
+                etree.SubElement(ledger_entry, 'LEDGERNAME').text = account_name
                 etree.SubElement(ledger_entry, 'ISDEEMEDPOSITIVE').text = "No"
                 etree.SubElement(ledger_entry, 'AMOUNT').text = str(row['Credit'])
 
@@ -508,6 +515,9 @@ if uploaded_zip is not None:
         }
 
         with st.spinner("Converting data to Tally XML format..."):
+            # Clear global maps at the start of each run
+            CUSTOMER_ID_TO_NAME_MAP.clear()
+            VENDOR_ID_TO_NAME_MAP.clear()
             for key, (csv_name, process_func) in processing_pipeline.items():
                 st.write(f"Processing {key.replace('_', ' ').title()}...")
                 df = raw_dfs.get(csv_name)
@@ -526,7 +536,16 @@ if uploaded_zip is not None:
                 else: st.write(f"  - ⚪️ Skipped (CSV not found).")
 
         st.subheader("4. Download Your Tally XML Files")
-        st.markdown("Import these files into Tally **one by one, in the order they are listed below**.")
+        st.markdown("""
+        Import these files into your test Tally company **one by one, strictly in the numbered order they appear in the ZIP file.** This is crucial because vouchers (like invoices) depend on masters (like customers) already being present in Tally.
+
+        **Recommended Import Order:**
+        1.  `01_chart_of_accounts.xml` (Ledger Groups & Ledgers)
+        2.  `02_items.xml` (Stock Items & **Units of Measure**)
+        3.  `03_contacts.xml` (Customers / Sundry Debtors)
+        4.  `04_vendors.xml` (Suppliers / Sundry Creditors)
+        5.  All subsequent voucher files (`05_invoices.xml`, `06_customer_payments.xml`, etc.)
+        """)
 
         output_zip_path = os.path.join(temp_dir, "tally_import_files.zip")
         with zipfile.ZipFile(output_zip_path, 'w') as zf:
@@ -563,8 +582,8 @@ if uploaded_zip is not None:
 st.markdown("---")
 st.info("""
 **How to Import into Tally:**
-1.  Go to `Gateway of Tally` > `Import Data` > `Masters` or `Vouchers`.
-2.  Select the XML file path for each file, starting with `01_chart_of_accounts.xml`.
-3.  Choose the appropriate behavior (e.g., 'Combine Opening Balances').
-4.  Press `Enter` to import. **Import files one-by-one in the numbered order.**
+1.  Go to `Gateway of Tally` > `Import Data` > `Masters` (for files 1-4) or `Vouchers` (for all other files).
+2.  Select the XML file path. **Start with `01_chart_of_accounts.xml`.**
+3.  Import each file **one at a time**. Do not proceed to the next file until the previous one has imported successfully.
+4.  For masters, choose the 'Modify with new data' or 'Combine Opening Balances' behavior as needed.
 """)
